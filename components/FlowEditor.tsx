@@ -263,8 +263,6 @@ function Editor() {
               onInit={(inst) => {
                 instanceRef.current = inst;
               }}
-              onDragOver={onDragOver}
-              onDrop={onDrop}
               fitView
               deleteKeyCode={['Backspace', 'Delete']}
               proOptions={{ hideAttribution: true }}
