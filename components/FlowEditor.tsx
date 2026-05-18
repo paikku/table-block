@@ -14,18 +14,19 @@ import type {
   Node as RFNode,
   Edge as RFEdge,
   Connection,
+  NodeTypes,
   OnConnect,
   ReactFlowInstance,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import NodePalette from './NodePalette';
-import ConfigPanel from './ConfigPanel';
+import ConfigModal from './ConfigModal';
 import TableNode from './TableNode';
 import type { FlowDoc, FlowEdge, FlowNode, NodeConfig, NodeKind } from '@/lib/types';
 import { defaultConfig } from '@/lib/types';
 import type { RunResult } from '@/lib/runFlow';
 
-const nodeTypes = Object.freeze({ tb: TableNode });
+const nodeTypes = Object.freeze({ tb: TableNode }) as unknown as NodeTypes;
 const VALID_KINDS: NodeKind[] = ['dynamic', 'crud', 'derived', 'interceptor'];
 
 type NodeData = { kind: NodeKind; name: string; subtitle?: string; config: NodeConfig };
@@ -34,9 +35,8 @@ function subtitleFor(cfg: NodeConfig): string {
   if (cfg.kind === 'dynamic') return cfg.fetchUrl;
   if (cfg.kind === 'crud') return `${cfg.schema.length} cols • h=${cfg.history ? 'on' : 'off'}`;
   if (cfg.kind === 'derived') {
-    const npick = Array.isArray(cfg.pickColumns) ? cfg.pickColumns.length : 0;
-    const ncmp = Array.isArray(cfg.computeColumns) ? cfg.computeColumns.length : 0;
-    return `${npick}pick / ${ncmp}cmp`;
+    const nrules = Array.isArray(cfg.cellRules) ? cfg.cellRules.length : 0;
+    return `${cfg.rowGen.type} · ${nrules} cells`;
   }
   return `${cfg.mode} • ${cfg.guard}`;
 }
@@ -254,7 +254,7 @@ function Editor() {
             <ReactFlow
               nodes={nodes.map((n) => ({ ...n, selected: n.id === selectedId }))}
               edges={edges}
-              nodeTypes={nodeTypes as unknown as Record<string, React.ComponentType<unknown>>}
+              nodeTypes={nodeTypes}
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
@@ -275,14 +275,16 @@ function Editor() {
             </ReactFlow>
           </div>
         </div>
-        <ConfigPanel
-          node={selectedFlowNode}
-          allNodes={docNodesForPanel}
-          allEdges={docEdgesForPanel}
-          onChange={onConfigChange}
-          onDelete={onDeleteNode}
-        />
       </div>
+
+      <ConfigModal
+        node={selectedFlowNode}
+        allNodes={docNodesForPanel}
+        allEdges={docEdgesForPanel}
+        onChange={onConfigChange}
+        onDelete={onDeleteNode}
+        onClose={() => setSelectedId(null)}
+      />
 
       <section className="h-64 border-t border-neutral-800 bg-neutral-950 shrink-0 flex">
         <div className="w-1/2 border-r border-neutral-800 overflow-y-auto p-3">

@@ -48,19 +48,12 @@ export const SAMPLE_FLOW: FlowDoc = {
       config: {
         kind: 'derived',
         name: 'final_price',
-        primaryNodeId: 'd1',
-        inputJoins: [{ fromNodeId: 'c1', key: 'id' }],
-        pickColumns: [
-          { from: 'primary', col: 'id' },
-          { from: 'primary', col: 'price' },
-          { from: 'c1', col: 'rate' },
-        ],
-        computeColumns: [
-          {
-            name: 'final',
-            mode: 'formula',
-            formula: 'row.price * (1 - (out.rate ?? 0))',
-          },
+        rowGen: { type: 'keysFrom', fromNodeId: 'd1', keys: ['id'] },
+        cellRules: [
+          { name: 'id', mode: 'pick', from: 'd1', col: 'id' },
+          { name: 'price', mode: 'pick', from: 'd1', col: 'price' },
+          { name: 'rate', mode: 'pick', from: 'c1', col: 'rate' },
+          { name: 'final', mode: 'formula', formula: 'row.price * (1 - (out.rate ?? 0))' },
           {
             name: 'tier',
             mode: 'cases',
@@ -92,14 +85,12 @@ export const SAMPLE_FLOW: FlowDoc = {
       config: {
         kind: 'derived',
         name: 'report',
-        primaryNodeId: 'i1',
-        inputJoins: [],
-        pickColumns: [
-          { from: 'primary', col: 'id' },
-          { from: 'primary', col: 'final' },
-          { from: 'primary', col: 'tier' },
+        rowGen: { type: 'keysFrom', fromNodeId: 'i1', keys: ['id'] },
+        cellRules: [
+          { name: 'id', mode: 'pick', from: 'i1', col: 'id' },
+          { name: 'final', mode: 'pick', from: 'i1', col: 'final' },
+          { name: 'tier', mode: 'pick', from: 'i1', col: 'tier' },
         ],
-        computeColumns: [],
       },
     },
   ],

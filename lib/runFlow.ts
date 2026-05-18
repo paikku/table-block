@@ -6,10 +6,12 @@ import type {
   CrudConfig,
   DerivedConfig,
   InterceptorConfig,
+  RowGenSpec,
+  CellRule,
 } from './types';
-import { normalizePicks, normalizeComputes } from './types';
 
 type Row = Record<string, unknown>;
+
 export interface TableData {
   schema: ColumnDef[];
   rows: Row[];
@@ -75,6 +77,76 @@ function safeEval(expr: string, ctx: Record<string, unknown>): unknown {
   return fn(...vals);
 }
 
+// ── rowGen 평가 ─────────────────────────────────────────────────────────
+//
+// 각 항목: keyVals(키 컬럼 값들) + originNodeId(어디서 왔는지) + originRow(원본 행).
+// Union 으로 dedupe 할 때 keyVals 의 JSON 직렬화로 비교.
+
+interface RowSeed {
+  keyVals: Record<string, unknown>;
+  originNodeId?: string;
+  originRow?: Row;
+}
+
+function evalRowGen(
+  spec: RowGenSpec,
+  tables: Record<string, TableData>,
+  inputs: Record<string, TableData>,
+): { seeds: RowSeed[]; keys: string[] } {
+  if (spec.type === 'keysFrom') {
+    const src = tables[spec.fromNodeId];
+    if (!src) return { seeds: [], keys: spec.keys };
+    const seeds: RowSeed[] = src.rows.map((r) => {
+      const kv: Record<string, unknown> = {};
+      for (const k of spec.keys) kv[k] = r[k];
+      return { keyVals: kv, originNodeId: spec.fromNodeId, originRow: r };
+    });
+    return { seeds, keys: spec.keys };
+  }
+  if (spec.type === 'union') {
+    const seen = new Set<string>();
+    const seeds: RowSeed[] = [];
+    let keys: string[] = [];
+    for (const sub of spec.sources) {
+      const r = evalRowGen(sub, tables, inputs);
+      if (keys.length === 0) keys = r.keys;
+      for (const s of r.seeds) {
+        const sig = JSON.stringify(s.keyVals);
+        if (seen.has(sig)) continue;
+        seen.add(sig);
+        seeds.push(s);
+      }
+    }
+    return { seeds, keys };
+  }
+  // filter
+  const inner = evalRowGen(spec.source, tables, inputs);
+  const seeds = inner.seeds.filter((s) => {
+    try {
+      return !!safeEval(spec.predicate || 'true', { row: s.originRow ?? s.keyVals, key: s.keyVals, inputs });
+    } catch {
+      return false;
+    }
+  });
+  return { seeds, keys: inner.keys };
+}
+
+// 단일 키 가정 — 양쪽에서 같은 컬럼명을 가진다.
+function lookupRow(table: TableData, keyVals: Record<string, unknown>, keys: string[]): Row | undefined {
+  return table.rows.find((r) => keys.every((k) => r[k] === keyVals[k]));
+}
+
+function deriveOutputSchema(cellRules: CellRule[]): ColumnDef[] {
+  const out: ColumnDef[] = [];
+  const seen = new Set<string>();
+  for (const c of cellRules) {
+    if (!c.name || seen.has(c.name)) continue;
+    seen.add(c.name);
+    out.push({ name: c.name, type: 'string' });
+  }
+  return out;
+}
+
 export async function runFlow(doc: FlowDoc): Promise<RunResult> {
   const logs: LogEntry[] = [];
   const tables: Record<string, TableData> = {};
@@ -114,7 +186,11 @@ export async function runFlow(doc: FlowDoc): Promise<RunResult> {
           try {
             const res = await fetch(c.fetchUrl, { signal: AbortSignal.timeout(5000) });
             const j = await res.json();
-            rows = Array.isArray(j) ? (j as Row[]) : Array.isArray((j as { data?: Row[] }).data) ? (j as { data: Row[] }).data : [j as Row];
+            rows = Array.isArray(j)
+              ? (j as Row[])
+              : Array.isArray((j as { data?: Row[] }).data)
+                ? (j as { data: Row[] }).data
+                : [j as Row];
           } catch (e) {
             logs.push({ nodeId: id, level: 'warn', message: `fetch failed, using mock: ${(e as Error).message}` });
             rows = mockRowsFromSchema(c.schema);
@@ -135,101 +211,101 @@ export async function runFlow(doc: FlowDoc): Promise<RunResult> {
           logs.push({ nodeId: id, level: 'warn', message: 'invalid rowsJson, treating as empty' });
         }
         tables[id] = { schema: c.schema, rows };
-        logs.push({ nodeId: id, level: 'info', message: `[CRUD] ${c.name}: ${rows.length} rows (history=${c.history}, audit=${c.audit})` });
+        logs.push({
+          nodeId: id,
+          level: 'info',
+          message: `[CRUD] ${c.name}: ${rows.length} rows (history=${c.history}, audit=${c.audit})`,
+        });
       } else if (cfg.kind === 'derived') {
         const c = cfg as DerivedConfig;
-        const picks = normalizePicks(c.pickColumns as unknown);
-        const computes = normalizeComputes(c.computeColumns as unknown);
-        const inputJoins = Array.isArray(c.inputJoins) ? c.inputJoins : [];
 
         const inputs: Record<string, TableData> = {};
-        const inputByNodeId: Record<string, TableData> = {};
         for (const uid of upstreamIds) {
           const un = byId.get(uid);
-          if (un && tables[uid]) {
-            inputs[un.config.name] = tables[uid];
-            inputByNodeId[uid] = tables[uid];
-          }
-        }
-        const primaryId = c.primaryNodeId || upstreamIds[0];
-        const primary = tables[primaryId];
-        if (!primary) {
-          logs.push({ nodeId: id, level: 'error', message: 'no primary input table' });
-          tables[id] = { schema: [], rows: [] };
-          continue;
+          if (un && tables[uid]) inputs[un.config.name] = tables[uid];
         }
 
-        const isPrimary = (from: string) => from === 'primary' || from === primaryId;
-
-        const autoKey = (a: ColumnDef[], b: ColumnDef[]): string => {
-          const bs = new Set(b.map((s) => s.name));
-          for (const x of a) if (bs.has(x.name)) return x.name;
-          return '';
-        };
-
-        const outSchema: ColumnDef[] = [];
-        const seen = new Set<string>();
-        for (const pe of picks) {
-          const src = isPrimary(pe.from) ? primary : inputByNodeId[pe.from];
-          if (!src) continue;
-          const col = src.schema.find((s) => s.name === pe.col);
-          if (col && !seen.has(col.name)) {
-            outSchema.push({ name: col.name, type: col.type });
-            seen.add(col.name);
-          }
-        }
-        for (const cc of computes) {
-          if (!seen.has(cc.name)) {
-            outSchema.push({ name: cc.name, type: 'string' });
-            seen.add(cc.name);
-          }
-        }
+        const { seeds, keys } = evalRowGen(c.rowGen, tables, inputs);
+        const outSchema = deriveOutputSchema(c.cellRules);
 
         const outRows: Row[] = [];
-        for (const row of primary.rows) {
+        for (const seed of seeds) {
           const out: Row = {};
-          for (const pe of picks) {
-            if (isPrimary(pe.from)) {
-              out[pe.col] = row[pe.col];
-            } else {
-              const srcTable = inputByNodeId[pe.from];
-              if (!srcTable) { out[pe.col] = null; continue; }
-              const join = inputJoins.find((j) => j.fromNodeId === pe.from);
-              const key = join?.key || autoKey(primary.schema, srcTable.schema);
-              if (!key) { out[pe.col] = null; continue; }
-              const match = srcTable.rows.find((r) => r[key] === row[key]);
-              out[pe.col] = match ? match[pe.col] ?? null : null;
-            }
-          }
-          for (const cc of computes) {
-            const ctx = { row, out, inputs };
-            try {
-              if (cc.mode === 'cases') {
-                let v: unknown = safeEval(cc.default || 'null', ctx);
-                for (const cs of cc.cases) {
-                  let matched = false;
-                  try { matched = !!safeEval(cs.when, ctx); }
-                  catch (e) {
-                    logs.push({ nodeId: id, level: 'warn', message: `compute(${cc.name}).when error: ${(e as Error).message}` });
-                  }
-                  if (matched) {
-                    v = safeEval(cs.then, ctx);
-                    break;
-                  }
-                }
-                out[cc.name] = v;
+          for (const rule of c.cellRules) {
+            if (rule.mode === 'pick') {
+              // origin 노드와 일치하면 그대로
+              if (rule.from === seed.originNodeId && seed.originRow) {
+                out[rule.name] = seed.originRow[rule.col] ?? null;
               } else {
-                out[cc.name] = safeEval(cc.formula, ctx);
+                const src = tables[rule.from];
+                if (!src) {
+                  out[rule.name] = null;
+                } else {
+                  const match = lookupRow(src, seed.keyVals, keys);
+                  out[rule.name] = match ? match[rule.col] ?? null : null;
+                }
               }
-            } catch (e) {
-              logs.push({ nodeId: id, level: 'warn', message: `compute(${cc.name}) failed: ${(e as Error).message}` });
-              out[cc.name] = null;
+            } else if (rule.mode === 'formula') {
+              try {
+                out[rule.name] = safeEval(rule.formula || 'null', {
+                  row: seed.originRow ?? seed.keyVals,
+                  key: seed.keyVals,
+                  out,
+                  inputs,
+                });
+              } catch (e) {
+                logs.push({
+                  nodeId: id,
+                  level: 'warn',
+                  message: `cellRule(${rule.name}) formula error: ${(e as Error).message}`,
+                });
+                out[rule.name] = null;
+              }
+            } else {
+              // cases (first-match-wins)
+              const ctx = { row: seed.originRow ?? seed.keyVals, key: seed.keyVals, out, inputs };
+              let v: unknown = null;
+              try {
+                v = safeEval(rule.default || 'null', ctx);
+              } catch {
+                v = null;
+              }
+              for (const cs of rule.cases) {
+                let matched = false;
+                try {
+                  matched = !!safeEval(cs.when, ctx);
+                } catch (e) {
+                  logs.push({
+                    nodeId: id,
+                    level: 'warn',
+                    message: `cellRule(${rule.name}).when error: ${(e as Error).message}`,
+                  });
+                }
+                if (matched) {
+                  try {
+                    v = safeEval(cs.then, ctx);
+                  } catch (e) {
+                    logs.push({
+                      nodeId: id,
+                      level: 'warn',
+                      message: `cellRule(${rule.name}).then error: ${(e as Error).message}`,
+                    });
+                  }
+                  break;
+                }
+              }
+              out[rule.name] = v;
             }
           }
           outRows.push(out);
         }
+
         tables[id] = { schema: outSchema, rows: outRows };
-        logs.push({ nodeId: id, level: 'info', message: `[Derived] ${c.name}: ${outRows.length} rows` });
+        logs.push({
+          nodeId: id,
+          level: 'info',
+          message: `[Derived] ${c.name}: rowGen=${c.rowGen.type} → ${outRows.length} rows`,
+        });
       } else if (cfg.kind === 'interceptor') {
         const c = cfg as InterceptorConfig;
         const src = tables[upstreamIds[0]];
@@ -270,7 +346,11 @@ export async function runFlow(doc: FlowDoc): Promise<RunResult> {
             }
           });
           tables[id] = { schema: src.schema, rows: filtered };
-          logs.push({ nodeId: id, level: 'info', message: `[Interceptor:filter] ${c.name} ${src.rows.length} → ${filtered.length}` });
+          logs.push({
+            nodeId: id,
+            level: 'info',
+            message: `[Interceptor:filter] ${c.name} ${src.rows.length} → ${filtered.length}`,
+          });
         }
       }
     } catch (e) {

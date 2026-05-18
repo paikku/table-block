@@ -9,7 +9,7 @@ export interface DynamicConfig {
   kind: 'dynamic';
   name: string;
   schema: ColumnDef[];
-  fetchUrl: string;            // http(s)://... 또는 mock
+  fetchUrl: string;
   params: Record<string, string>;
   cacheTtlSec: number;
 }
@@ -18,52 +18,72 @@ export interface CrudConfig {
   kind: 'crud';
   name: string;
   schema: ColumnDef[];
-  rowsJson: string;            // JSON 문자열로 보관 (UI 편집 용이)
+  rowsJson: string;
   history: boolean;
   audit: boolean;
 }
 
-export interface InputJoin {
-  fromNodeId: string;          // primary 가 아닌 incoming 노드의 id
-  key: string;                 // 양쪽에 공통으로 존재하는 컬럼명 (v1: 양쪽 동일)
-}
+// ── Derived: 행 층 (rowGen) ────────────────────────────────────────────
+//
+// MVP 범위: KeysFrom / Union / Filter 까지만.
+// Product, Generate 는 docs/mvp.md 의 후순위 항목.
 
-export interface PickEntry {
-  from: string;                // 'primary' 또는 다른 incoming 노드의 id
+export interface KeysFromSpec {
+  type: 'keysFrom';
+  fromNodeId: string;      // incoming 노드 id
+  keys: string[];          // 키 컬럼명 (MVP: 단일 키 가정 — 양쪽 동일 이름)
+}
+export interface UnionSpec {
+  type: 'union';
+  sources: RowGenSpec[];
+}
+export interface FilterSpec {
+  type: 'filter';
+  source: RowGenSpec;
+  predicate: string;       // safeEval(row, inputs) — true 인 행만
+}
+export type RowGenSpec = KeysFromSpec | UnionSpec | FilterSpec;
+
+// ── Derived: 셀 층 (cellRules) ──────────────────────────────────────────
+//
+// 한 entry = 한 출력 컬럼. mode 로 pick / formula / cases 분기.
+// 구버전 pickColumns/computeColumns 는 normalize 단계에서 모두 cellRules 로 흡수.
+
+export interface CellPick {
+  name: string;
+  mode: 'pick';
+  from: string;            // node id (KeysFrom 의 fromNodeId 와 같으면 origin row 에서 직접)
   col: string;
 }
-
-export interface ComputeFormula {
+export interface CellFormula {
   name: string;
-  mode?: 'formula';
+  mode: 'formula';
   formula: string;
 }
-
-export interface ComputeCases {
+export interface CellCases {
   name: string;
   mode: 'cases';
   cases: { when: string; then: string }[];
   default: string;
 }
-
-export type ComputeColumn = ComputeFormula | ComputeCases;
+export type CellRule = CellPick | CellFormula | CellCases;
 
 export interface DerivedConfig {
   kind: 'derived';
   name: string;
-  primaryNodeId: string;
-  inputJoins: InputJoin[];
-  pickColumns: PickEntry[];
-  computeColumns: ComputeColumn[];
+  rowGen: RowGenSpec;
+  cellRules: CellRule[];
 }
+
+// ── Interceptor ─────────────────────────────────────────────────────────
 
 export type InterceptorMode = 'pass' | 'block-on-fail' | 'filter';
 export interface InterceptorConfig {
   kind: 'interceptor';
   name: string;
   mode: InterceptorMode;
-  guard: string;               // predicate; row 컨텍스트 사용
-  effect: string;              // 설명 문자열 (mail:..., webhook:..., log:...)
+  guard: string;
+  effect: string;
 }
 
 export type NodeConfig =
@@ -88,6 +108,12 @@ export interface FlowEdge {
 export interface FlowDoc {
   nodes: FlowNode[];
   edges: FlowEdge[];
+}
+
+// ── Defaults ────────────────────────────────────────────────────────────
+
+export function defaultRowGen(): RowGenSpec {
+  return { type: 'keysFrom', fromNodeId: '', keys: ['id'] };
 }
 
 export function defaultConfig(kind: NodeKind, name: string): NodeConfig {
@@ -127,10 +153,8 @@ export function defaultConfig(kind: NodeKind, name: string): NodeConfig {
       return {
         kind: 'derived',
         name,
-        primaryNodeId: '',
-        inputJoins: [],
-        pickColumns: [],
-        computeColumns: [],
+        rowGen: defaultRowGen(),
+        cellRules: [],
       };
     case 'interceptor':
       return {
@@ -143,51 +167,114 @@ export function defaultConfig(kind: NodeKind, name: string): NodeConfig {
   }
 }
 
-// ── Legacy normalization ──
-// Old shape: pickColumns: string[], computeColumns: { name, formula }[]
-// New shape: pickColumns: PickEntry[], computeColumns: ComputeColumn[] (mode optional, default 'formula')
-// loadFlow 시점에 한 번 통과시켜 두면 UI/runFlow 모두 새 모양만 알면 됨.
+// ── Legacy normalization ────────────────────────────────────────────────
+//
+// 구버전 Derived 모양:
+//   { primaryNodeId, inputJoins[], pickColumns: PickEntry[], computeColumns: ComputeColumn[] }
+// 신버전:
+//   { rowGen: KeysFrom(primary, [autoKey]), cellRules: [...] }
+//
+// 변환 규칙:
+//   - primaryNodeId  → rowGen.keysFrom.fromNodeId
+//   - inputJoins 의 첫 key, 또는 'id' 를 단일 키로 채택 (MVP 가정)
+//   - pickColumns    → cellRules { mode:'pick', from, col, name=col }
+//   - computeColumns → cellRules { mode:'formula'|'cases', ... }
+//   - 'primary' alias 는 fromNodeId 로 치환
 
-export function normalizePicks(raw: unknown): PickEntry[] {
-  if (!Array.isArray(raw)) return [];
-  return raw.map((p) => {
-    if (typeof p === 'string') return { from: 'primary', col: p };
-    const pe = p as Partial<PickEntry>;
-    return { from: pe.from ?? 'primary', col: pe.col ?? '' };
-  });
+function legacyDerivedToNew(raw: unknown): DerivedConfig {
+  const c = (raw ?? {}) as Record<string, unknown>;
+  const name = String(c.name ?? '');
+
+  // 이미 신모델
+  if (c.rowGen && Array.isArray(c.cellRules)) {
+    return {
+      kind: 'derived',
+      name,
+      rowGen: normalizeRowGen(c.rowGen),
+      cellRules: normalizeCellRules(c.cellRules),
+    };
+  }
+
+  // 구모델 → 신모델
+  const primaryNodeId = String(c.primaryNodeId ?? '');
+  const inputJoins = Array.isArray(c.inputJoins) ? (c.inputJoins as Array<{ key?: string }>) : [];
+  const guessKey = inputJoins[0]?.key ?? 'id';
+
+  const picks: CellRule[] = Array.isArray(c.pickColumns)
+    ? (c.pickColumns as Array<{ from?: string; col?: string } | string>).map((p) => {
+        if (typeof p === 'string') {
+          return { name: p, mode: 'pick', from: primaryNodeId, col: p };
+        }
+        const from = p?.from === 'primary' || !p?.from ? primaryNodeId : p.from;
+        const col = p?.col ?? '';
+        return { name: col, mode: 'pick', from, col };
+      })
+    : [];
+
+  const computes: CellRule[] = Array.isArray(c.computeColumns)
+    ? (c.computeColumns as Array<Record<string, unknown>>).map((cc) => {
+        const ccName = String(cc.name ?? '');
+        if (cc.mode === 'cases') {
+          return {
+            name: ccName,
+            mode: 'cases',
+            cases: Array.isArray(cc.cases) ? (cc.cases as { when: string; then: string }[]) : [],
+            default: String(cc.default ?? 'null'),
+          };
+        }
+        return { name: ccName, mode: 'formula', formula: String(cc.formula ?? '') };
+      })
+    : [];
+
+  return {
+    kind: 'derived',
+    name,
+    rowGen: { type: 'keysFrom', fromNodeId: primaryNodeId, keys: [guessKey] },
+    cellRules: [...picks, ...computes],
+  };
 }
 
-export function normalizeComputes(raw: unknown): ComputeColumn[] {
+function normalizeRowGen(raw: unknown): RowGenSpec {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (r.type === 'union' && Array.isArray(r.sources)) {
+    return { type: 'union', sources: (r.sources as unknown[]).map(normalizeRowGen) };
+  }
+  if (r.type === 'filter' && r.source) {
+    return {
+      type: 'filter',
+      source: normalizeRowGen(r.source),
+      predicate: String(r.predicate ?? 'true'),
+    };
+  }
+  // default to keysFrom
+  return {
+    type: 'keysFrom',
+    fromNodeId: String(r.fromNodeId ?? ''),
+    keys: Array.isArray(r.keys) && r.keys.length > 0 ? (r.keys as string[]) : ['id'],
+  };
+}
+
+function normalizeCellRules(raw: unknown): CellRule[] {
   if (!Array.isArray(raw)) return [];
   return raw.map((c) => {
-    const cc = (c ?? {}) as {
-      name?: string;
-      mode?: 'formula' | 'cases';
-      formula?: string;
-      cases?: { when: string; then: string }[];
-      default?: string;
-    };
+    const cc = (c ?? {}) as Record<string, unknown>;
+    const name = String(cc.name ?? '');
+    if (cc.mode === 'pick') {
+      return { name, mode: 'pick', from: String(cc.from ?? ''), col: String(cc.col ?? name) };
+    }
     if (cc.mode === 'cases') {
       return {
-        name: cc.name ?? '',
+        name,
         mode: 'cases',
-        cases: Array.isArray(cc.cases) ? cc.cases : [],
-        default: cc.default ?? 'null',
+        cases: Array.isArray(cc.cases) ? (cc.cases as { when: string; then: string }[]) : [],
+        default: String(cc.default ?? 'null'),
       };
     }
-    return { name: cc.name ?? '', mode: 'formula', formula: cc.formula ?? '' };
+    return { name, mode: 'formula', formula: String(cc.formula ?? '') };
   });
 }
 
 export function normalizeNodeConfig(cfg: NodeConfig): NodeConfig {
-  if (cfg.kind !== 'derived') return cfg;
-  // legacy rules 필드가 있어도 무시 (DerivedConfig 에서 제거됨).
-  const { ...rest } = cfg as DerivedConfig & { rules?: unknown };
-  delete (rest as { rules?: unknown }).rules;
-  return {
-    ...rest,
-    inputJoins: Array.isArray(rest.inputJoins) ? rest.inputJoins : [],
-    pickColumns: normalizePicks(rest.pickColumns as unknown),
-    computeColumns: normalizeComputes(rest.computeColumns as unknown),
-  };
+  if (cfg.kind === 'derived') return legacyDerivedToNew(cfg);
+  return cfg;
 }
