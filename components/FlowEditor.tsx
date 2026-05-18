@@ -17,6 +17,7 @@ import type {
   NodeChange,
   EdgeChange,
   OnConnect,
+  ReactFlowInstance,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import NodePalette from './NodePalette';
@@ -27,6 +28,7 @@ import { defaultConfig } from '@/lib/types';
 import type { RunResult } from '@/lib/runFlow';
 
 const nodeTypes = { tb: TableNode };
+const VALID_KINDS: NodeKind[] = ['dynamic', 'crud', 'derived', 'interceptor'];
 
 function toRfNodes(nodes: FlowNode[]): RFNode[] {
   return nodes.map((n) => ({
@@ -52,6 +54,17 @@ function newId(kind: NodeKind, existing: FlowNode[]): string {
   return `${prefix}${i}`;
 }
 
+function extractKind(dt: DataTransfer): NodeKind | null {
+  const direct = dt.getData('application/x-tableblock-kind');
+  if (direct && (VALID_KINDS as string[]).includes(direct)) return direct as NodeKind;
+  const plain = dt.getData('text/plain');
+  if (plain.startsWith('tableblock:')) {
+    const k = plain.slice('tableblock:'.length);
+    if ((VALID_KINDS as string[]).includes(k)) return k as NodeKind;
+  }
+  return null;
+}
+
 function Editor() {
   const [doc, setDoc] = useState<FlowDoc>({ nodes: [], edges: [] });
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -60,6 +73,7 @@ function Editor() {
   const [result, setResult] = useState<RunResult | null>(null);
   const [status, setStatus] = useState<string>('');
   const wrapperRef = useRef<HTMLDivElement>(null);
+  const instanceRef = useRef<ReactFlowInstance | null>(null);
   const { screenToFlowPosition } = useReactFlow();
 
   useEffect(() => {
@@ -116,14 +130,21 @@ function Editor() {
   const onDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
-      const kind = e.dataTransfer.getData('application/x-tableblock-kind') as NodeKind;
-      if (!kind) return;
-      const position = screenToFlowPosition({ x: e.clientX, y: e.clientY });
+      const kind = extractKind(e.dataTransfer);
+      if (!kind) {
+        setStatus('drop ignored: unknown payload');
+        return;
+      }
+      const inst = instanceRef.current;
+      const position = inst
+        ? inst.screenToFlowPosition({ x: e.clientX, y: e.clientY })
+        : screenToFlowPosition({ x: e.clientX, y: e.clientY });
       setDoc((prev) => {
         const id = newId(kind, prev.nodes);
         const node: FlowNode = { id, kind, position, config: defaultConfig(kind, `${kind}_${id}`) };
         return { ...prev, nodes: [...prev.nodes, node] };
       });
+      setStatus(`dropped ${kind} @ (${Math.round(position.x)}, ${Math.round(position.y)})`);
     },
     [screenToFlowPosition],
   );
@@ -231,6 +252,9 @@ function Editor() {
             onConnect={onConnect}
             onNodeClick={(_, n) => setSelectedId(n.id)}
             onPaneClick={() => setSelectedId(null)}
+            onInit={(inst) => { instanceRef.current = inst; }}
+            onDragOver={onDragOver}
+            onDrop={onDrop}
             fitView
             deleteKeyCode={['Backspace', 'Delete']}
           >

@@ -12,11 +12,11 @@ const PALETTE: Record<NodeKind, { label: string; bar: string; chip: string; ring
 export default function TableNode({ data }: { data: { kind: NodeKind; name: string; subtitle?: string } }) {
   const p = PALETTE[data.kind];
   return (
-    <div className={`tb-node w-56 rounded-md border ${p.ring} bg-neutral-900 shadow-md overflow-hidden`}>
-      <div className={`h-1 ${p.bar}`} />
+    <div className={`tb-node relative w-56 rounded-md border ${p.ring} bg-neutral-900 shadow-md`}>
+      <div className={`h-1 ${p.bar} rounded-t-md`} />
       <div className="p-3">
         <div className={`inline-block text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${p.chip} mb-1.5`}>{p.label}</div>
-        <div className="text-sm font-medium truncate">{data.name || '(unnamed)'}</div>
+        <div className="text-sm font-medium truncate text-neutral-100">{data.name || '(unnamed)'}</div>
         {data.subtitle && <div className="text-xs text-neutral-400 mt-0.5 truncate">{data.subtitle}</div>}
       </div>
       <Handle type="target" position={Position.Left} />
