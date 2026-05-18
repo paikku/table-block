@@ -6,6 +6,10 @@ import type {
   CrudConfig,
   DerivedConfig,
   InterceptorConfig,
+  RowGen,
+  GenerateRange,
+  GenerateCalendar,
+  GenerateRecursion,
 } from './types';
 import { normalizePicks, normalizeComputes } from './types';
 
@@ -73,6 +77,194 @@ function safeEval(expr: string, ctx: Record<string, unknown>): unknown {
   // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
   const fn = new Function(...keys, `"use strict"; return (${expr});`);
   return fn(...vals);
+}
+
+// 행 층 평가. rowGen 미지정 시 primary rows 그대로 반환 (legacy).
+export interface RowGenResult {
+  rows: Row[];
+  schema: ColumnDef[];       // rowGen 으로 인해 알려진 컬럼들 (key/generate 컬럼)
+  warnings: string[];
+}
+
+function evalGenerate(
+  spec: GenerateRange | GenerateCalendar | GenerateRecursion,
+): { rows: Row[]; column: string; type: ColumnDef['type'] } {
+  if (spec.kind === 'range') {
+    const rows: Row[] = [];
+    const step = spec.step || 1;
+    if (step > 0) {
+      for (let v = spec.from; v < spec.to; v += step) {
+        rows.push({ [spec.column]: v });
+        if (rows.length > 10000) break;
+      }
+    } else {
+      for (let v = spec.from; v > spec.to; v += step) {
+        rows.push({ [spec.column]: v });
+        if (rows.length > 10000) break;
+      }
+    }
+    return { rows, column: spec.column, type: 'number' };
+  }
+  if (spec.kind === 'calendar') {
+    const rows: Row[] = [];
+    const start = new Date(spec.start + 'T00:00:00Z');
+    const end = new Date(spec.end + 'T00:00:00Z');
+    const stepMs = Math.max(1, spec.stepDays) * 24 * 60 * 60 * 1000;
+    for (let t = start.getTime(); t <= end.getTime(); t += stepMs) {
+      rows.push({ [spec.column]: new Date(t).toISOString().slice(0, 10) });
+      if (rows.length > 10000) break;
+    }
+    return { rows, column: spec.column, type: 'string' };
+  }
+  // recursion
+  const rows: Row[] = [];
+  let prev: unknown;
+  try {
+    prev = safeEval(spec.seedExpr || 'null', {});
+  } catch {
+    return { rows, column: spec.column, type: 'string' };
+  }
+  const max = Math.max(1, Math.min(spec.maxRows || 100, 10000));
+  for (let i = 0; i < max; i++) {
+    let cont = false;
+    try {
+      cont = !!safeEval(spec.whileExpr || 'false', { ctx: { prev, i } });
+    } catch {
+      cont = false;
+    }
+    if (!cont) break;
+    rows.push({ [spec.column]: prev });
+    try {
+      prev = safeEval(spec.nextExpr || 'ctx.prev', { ctx: { prev, i } });
+    } catch {
+      break;
+    }
+  }
+  return { rows, column: spec.column, type: 'string' };
+}
+
+export function evalRowGen(
+  rg: RowGen | undefined,
+  filterPredicate: string | undefined,
+  primary: TableData | undefined,
+  inputByNodeId: Record<string, TableData>,
+): RowGenResult {
+  const warnings: string[] = [];
+  let rows: Row[] = [];
+  let schema: ColumnDef[] = [];
+
+  if (!rg) {
+    rows = primary ? [...primary.rows] : [];
+    schema = primary ? [...primary.schema] : [];
+  } else if (rg.kind === 'keys-from') {
+    const src = inputByNodeId[rg.sourceNodeId];
+    if (!src) {
+      warnings.push(`keys-from: source "${rg.sourceNodeId}" not in upstream`);
+    } else {
+      const cols = rg.keyColumns.length > 0
+        ? rg.keyColumns
+        : src.schema.map((s) => s.name);
+      const seen = new Set<string>();
+      const out: Row[] = [];
+      for (const r of src.rows) {
+        const k: Row = {};
+        for (const c of cols) k[c] = r[c];
+        const sig = JSON.stringify(k);
+        if (seen.has(sig)) continue;
+        seen.add(sig);
+        out.push(k);
+      }
+      rows = out;
+      schema = cols.map((c) => {
+        const sc = src.schema.find((s) => s.name === c);
+        return { name: c, type: sc?.type ?? 'string' };
+      });
+    }
+  } else if (rg.kind === 'union') {
+    const seen = new Set<string>();
+    const out: Row[] = [];
+    const allCols = new Map<string, ColumnDef['type']>();
+    for (const part of rg.parts) {
+      const src = inputByNodeId[part.sourceNodeId];
+      if (!src) {
+        warnings.push(`union: source "${part.sourceNodeId}" not in upstream`);
+        continue;
+      }
+      const cols = part.keyColumns.length > 0 ? part.keyColumns : src.schema.map((s) => s.name);
+      for (const c of cols) {
+        if (!allCols.has(c)) {
+          const sc = src.schema.find((s) => s.name === c);
+          allCols.set(c, sc?.type ?? 'string');
+        }
+      }
+      for (const r of src.rows) {
+        const k: Row = {};
+        for (const c of cols) k[c] = r[c];
+        const sig = JSON.stringify(k);
+        if (seen.has(sig)) continue;
+        seen.add(sig);
+        out.push(k);
+      }
+    }
+    rows = out;
+    schema = [...allCols.entries()].map(([name, type]) => ({ name, type }));
+  } else if (rg.kind === 'product') {
+    const sources = rg.parts.map((p) => ({ id: p.sourceNodeId, t: inputByNodeId[p.sourceNodeId] }));
+    if (sources.some((s) => !s.t)) {
+      warnings.push('product: 일부 source 가 upstream 에 없음');
+    }
+    const valid = sources.filter((s) => !!s.t) as { id: string; t: TableData }[];
+    if (valid.length === 0) {
+      rows = [];
+    } else {
+      // accumulate: 시작은 첫 번째 테이블의 row, 이후 각 추가 source 에 대해 join/cartesian
+      let acc: Row[] = valid[0].t.rows.map((r) => ({ ...r }));
+      const colTypes = new Map<string, ColumnDef['type']>();
+      for (const sc of valid[0].t.schema) colTypes.set(sc.name, sc.type);
+      for (let i = 1; i < valid.length; i++) {
+        const next = valid[i].t;
+        for (const sc of next.schema) if (!colTypes.has(sc.name)) colTypes.set(sc.name, sc.type);
+        const merged: Row[] = [];
+        for (const a of acc) {
+          for (const b of next.rows) {
+            if (rg.joinKeys.length > 0) {
+              let ok = true;
+              for (const k of rg.joinKeys) {
+                if (k in a && k in b && a[k] !== b[k]) { ok = false; break; }
+              }
+              if (!ok) continue;
+            }
+            merged.push({ ...a, ...b });
+            if (merged.length > 10000) break;
+          }
+          if (merged.length > 10000) break;
+        }
+        acc = merged;
+      }
+      rows = acc;
+      schema = [...colTypes.entries()].map(([name, type]) => ({ name, type }));
+    }
+  } else if (rg.kind === 'generate') {
+    const g = evalGenerate(rg.spec);
+    rows = g.rows;
+    schema = [{ name: g.column, type: g.type }];
+  }
+
+  if (filterPredicate && filterPredicate.trim()) {
+    const before = rows.length;
+    rows = rows.filter((row) => {
+      try {
+        return !!safeEval(filterPredicate, { row });
+      } catch {
+        return false;
+      }
+    });
+    if (rows.length !== before) {
+      warnings.push(`filter: ${before} → ${rows.length} rows`);
+    }
+  }
+
+  return { rows, schema, warnings };
 }
 
 export async function runFlow(doc: FlowDoc): Promise<RunResult> {
@@ -162,8 +354,18 @@ export async function runFlow(doc: FlowDoc): Promise<RunResult> {
         }
         const primaryId = c.primaryNodeId || upstreamIds[0];
         const primary = tables[primaryId];
-        if (!primary) {
-          logs.push({ nodeId: id, level: 'error', message: 'no primary input table' });
+
+        // 행 층: rowGen 평가
+        const rowGenRes = evalRowGen(c.rowGen, c.rowGenFilter, primary, inputByNodeId);
+        for (const w of rowGenRes.warnings) {
+          logs.push({ nodeId: id, level: 'warn', message: `rowGen: ${w}` });
+        }
+        const baseRows = rowGenRes.rows;
+        const baseSchema = rowGenRes.schema;
+
+        // primary 가 없고 rowGen 도 없으면 (legacy 경로) 에러로 처리
+        if (!c.rowGen && !primary) {
+          logs.push({ nodeId: id, level: 'error', message: 'no primary input table (rowGen 미지정 시 primary 필수)' });
           tables[id] = { schema: [], rows: [] };
           continue;
         }
@@ -176,11 +378,22 @@ export async function runFlow(doc: FlowDoc): Promise<RunResult> {
           return '';
         };
 
+        // 출력 스키마: baseSchema (행 층 컬럼) → picks → computes 순서로 누적
         const outSchema: ColumnDef[] = [];
         const seen = new Set<string>();
+        for (const sc of baseSchema) {
+          if (!seen.has(sc.name)) {
+            outSchema.push({ name: sc.name, type: sc.type });
+            seen.add(sc.name);
+          }
+        }
         for (const pe of picks) {
-          const src = isPrimary(pe.from) ? primary : inputByNodeId[pe.from];
-          if (!src) continue;
+          // rowGen 사용 중이면 'primary' 대신 명시된 source 가 우선. 단 legacy 호환 위해 isPrimary 로직 유지.
+          const src = isPrimary(pe.from) ? (primary ?? undefined) : inputByNodeId[pe.from];
+          if (!src) {
+            if (!seen.has(pe.col)) { outSchema.push({ name: pe.col, type: 'string' }); seen.add(pe.col); }
+            continue;
+          }
           const col = src.schema.find((s) => s.name === pe.col);
           if (col && !seen.has(col.name)) {
             outSchema.push({ name: col.name, type: col.type });
@@ -195,16 +408,33 @@ export async function runFlow(doc: FlowDoc): Promise<RunResult> {
         }
 
         const outRows: Row[] = [];
-        for (const row of primary.rows) {
+        for (const row of baseRows) {
           const out: Row = {};
+          // base rowGen 이 만든 컬럼들도 out 으로 전파
+          for (const sc of baseSchema) out[sc.name] = row[sc.name];
           for (const pe of picks) {
             if (isPrimary(pe.from)) {
-              out[pe.col] = row[pe.col];
+              if (pe.col in row) {
+                out[pe.col] = row[pe.col];
+              } else if (primary) {
+                // rowGen 사용 중: primary 에서 lookup
+                const join = inputJoins.find((j) => j.fromNodeId === primaryId);
+                const key = join?.key || (baseSchema[0]?.name ?? '');
+                if (key && key in row) {
+                  const match = primary.rows.find((r) => r[key] === row[key]);
+                  out[pe.col] = match ? match[pe.col] ?? null : null;
+                } else {
+                  out[pe.col] = null;
+                }
+              } else {
+                out[pe.col] = null;
+              }
             } else {
               const srcTable = inputByNodeId[pe.from];
               if (!srcTable) { out[pe.col] = null; continue; }
               const join = inputJoins.find((j) => j.fromNodeId === pe.from);
-              const key = join?.key || autoKey(primary.schema, srcTable.schema);
+              const key = join?.key
+                || autoKey(primary?.schema ?? baseSchema, srcTable.schema);
               if (!key) { out[pe.col] = null; continue; }
               const match = srcTable.rows.find((r) => r[key] === row[key]);
               out[pe.col] = match ? match[pe.col] ?? null : null;
