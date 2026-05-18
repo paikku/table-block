@@ -21,7 +21,7 @@ import 'reactflow/dist/style.css';
 import NodePalette from './NodePalette';
 import ConfigPanel from './ConfigPanel';
 import TableNode from './TableNode';
-import type { FlowDoc, FlowNode, NodeConfig, NodeKind } from '@/lib/types';
+import type { FlowDoc, FlowEdge, FlowNode, NodeConfig, NodeKind } from '@/lib/types';
 import { defaultConfig } from '@/lib/types';
 import type { RunResult } from '@/lib/runFlow';
 
@@ -33,7 +33,12 @@ type NodeData = { kind: NodeKind; name: string; subtitle?: string; config: NodeC
 function subtitleFor(cfg: NodeConfig): string {
   if (cfg.kind === 'dynamic') return cfg.fetchUrl;
   if (cfg.kind === 'crud') return `${cfg.schema.length} cols • h=${cfg.history ? 'on' : 'off'}`;
-  if (cfg.kind === 'derived') return `${cfg.pickColumns.length}pick / ${cfg.computeColumns.length}cmp / ${cfg.rules.length}rules`;
+  if (cfg.kind === 'derived') {
+    const npick = Array.isArray(cfg.pickColumns) ? cfg.pickColumns.length : 0;
+    const ncmp = Array.isArray(cfg.computeColumns) ? cfg.computeColumns.length : 0;
+    const nrules = Array.isArray(cfg.rules) ? cfg.rules.length : 0;
+    return `${npick}pick / ${ncmp}cmp / ${nrules}rules`;
+  }
   return `${cfg.mode} • ${cfg.guard}`;
 }
 
@@ -214,6 +219,7 @@ function Editor() {
   };
 
   const docNodesForPanel = useMemo<FlowNode[]>(() => toDoc(nodes, edges).nodes, [nodes, edges]);
+  const docEdgesForPanel = useMemo<FlowEdge[]>(() => edges.map((e) => ({ id: e.id, source: e.source, target: e.target })), [edges]);
   const selectedFlowNode: FlowNode | null = selected
     ? { id: selected.id, kind: selected.data.kind, position: selected.position, config: selected.data.config }
     : null;
@@ -270,7 +276,13 @@ function Editor() {
             </ReactFlow>
           </div>
         </div>
-        <ConfigPanel node={selectedFlowNode} allNodes={docNodesForPanel} onChange={onConfigChange} onDelete={onDeleteNode} />
+        <ConfigPanel
+          node={selectedFlowNode}
+          allNodes={docNodesForPanel}
+          allEdges={docEdgesForPanel}
+          onChange={onConfigChange}
+          onDelete={onDeleteNode}
+        />
       </div>
 
       <section className="h-64 border-t border-neutral-800 bg-neutral-950 shrink-0 flex">

@@ -7,6 +7,7 @@ import type {
   DerivedConfig,
   InterceptorConfig,
 } from './types';
+import { normalizePicks, normalizeComputes } from './types';
 
 type Row = Record<string, unknown>;
 export interface TableData {
@@ -137,10 +138,18 @@ export async function runFlow(doc: FlowDoc): Promise<RunResult> {
         logs.push({ nodeId: id, level: 'info', message: `[CRUD] ${c.name}: ${rows.length} rows (history=${c.history}, audit=${c.audit})` });
       } else if (cfg.kind === 'derived') {
         const c = cfg as DerivedConfig;
+        const picks = normalizePicks(c.pickColumns as unknown);
+        const computes = normalizeComputes(c.computeColumns as unknown);
+        const inputJoins = Array.isArray(c.inputJoins) ? c.inputJoins : [];
+
         const inputs: Record<string, TableData> = {};
+        const inputByNodeId: Record<string, TableData> = {};
         for (const uid of upstreamIds) {
           const un = byId.get(uid);
-          if (un && tables[uid]) inputs[un.config.name] = tables[uid];
+          if (un && tables[uid]) {
+            inputs[un.config.name] = tables[uid];
+            inputByNodeId[uid] = tables[uid];
+          }
         }
         const primaryId = c.primaryNodeId || upstreamIds[0];
         const primary = tables[primaryId];
@@ -149,17 +158,69 @@ export async function runFlow(doc: FlowDoc): Promise<RunResult> {
           tables[id] = { schema: [], rows: [] };
           continue;
         }
-        const outSchema: ColumnDef[] = [
-          ...primary.schema.filter((s) => c.pickColumns.includes(s.name)),
-          ...c.computeColumns.map((cc) => ({ name: cc.name, type: 'string' as const })),
-        ];
+
+        const isPrimary = (from: string) => from === 'primary' || from === primaryId;
+
+        const autoKey = (a: ColumnDef[], b: ColumnDef[]): string => {
+          const bs = new Set(b.map((s) => s.name));
+          for (const x of a) if (bs.has(x.name)) return x.name;
+          return '';
+        };
+
+        const outSchema: ColumnDef[] = [];
+        const seen = new Set<string>();
+        for (const pe of picks) {
+          const src = isPrimary(pe.from) ? primary : inputByNodeId[pe.from];
+          if (!src) continue;
+          const col = src.schema.find((s) => s.name === pe.col);
+          if (col && !seen.has(col.name)) {
+            outSchema.push({ name: col.name, type: col.type });
+            seen.add(col.name);
+          }
+        }
+        for (const cc of computes) {
+          if (!seen.has(cc.name)) {
+            outSchema.push({ name: cc.name, type: 'string' });
+            seen.add(cc.name);
+          }
+        }
+
         const outRows: Row[] = [];
         for (const row of primary.rows) {
           const out: Row = {};
-          for (const col of c.pickColumns) out[col] = row[col];
-          for (const cc of c.computeColumns) {
+          for (const pe of picks) {
+            if (isPrimary(pe.from)) {
+              out[pe.col] = row[pe.col];
+            } else {
+              const srcTable = inputByNodeId[pe.from];
+              if (!srcTable) { out[pe.col] = null; continue; }
+              const join = inputJoins.find((j) => j.fromNodeId === pe.from);
+              const key = join?.key || autoKey(primary.schema, srcTable.schema);
+              if (!key) { out[pe.col] = null; continue; }
+              const match = srcTable.rows.find((r) => r[key] === row[key]);
+              out[pe.col] = match ? match[pe.col] ?? null : null;
+            }
+          }
+          for (const cc of computes) {
+            const ctx = { row, out, inputs };
             try {
-              out[cc.name] = safeEval(cc.formula, { row, inputs });
+              if (cc.mode === 'cases') {
+                let v: unknown = safeEval(cc.default || 'null', ctx);
+                for (const cs of cc.cases) {
+                  let matched = false;
+                  try { matched = !!safeEval(cs.when, ctx); }
+                  catch (e) {
+                    logs.push({ nodeId: id, level: 'warn', message: `compute(${cc.name}).when error: ${(e as Error).message}` });
+                  }
+                  if (matched) {
+                    v = safeEval(cs.then, ctx);
+                    break;
+                  }
+                }
+                out[cc.name] = v;
+              } else {
+                out[cc.name] = safeEval(cc.formula, ctx);
+              }
             } catch (e) {
               logs.push({ nodeId: id, level: 'warn', message: `compute(${cc.name}) failed: ${(e as Error).message}` });
               out[cc.name] = null;

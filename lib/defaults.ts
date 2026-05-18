@@ -49,18 +49,29 @@ export const SAMPLE_FLOW: FlowDoc = {
         kind: 'derived',
         name: 'final_price',
         primaryNodeId: 'd1',
-        pickColumns: ['id', 'price'],
+        inputJoins: [{ fromNodeId: 'c1', key: 'id' }],
+        pickColumns: [
+          { from: 'primary', col: 'id' },
+          { from: 'primary', col: 'price' },
+          { from: 'c1', col: 'rate' },
+        ],
         computeColumns: [
           {
             name: 'final',
-            formula:
-              "(inputs.discount_policy?.rows.find(r => r.id === row.id)?.rate ?? 0) > 0 ? row.price * (1 - inputs.discount_policy.rows.find(r => r.id === row.id).rate) : row.price",
+            mode: 'formula',
+            formula: 'row.price * (1 - (out.rate ?? 0))',
+          },
+          {
+            name: 'tier',
+            mode: 'cases',
+            cases: [
+              { when: 'row.price > 100', then: "'high'" },
+              { when: 'row.price > 50', then: "'mid'" },
+            ],
+            default: "'low'",
           },
         ],
-        rules: [
-          { when: 'row.price > 100', then: "({ tier: 'high' })" },
-          { when: 'true', then: "({ tier: 'low' })" },
-        ],
+        rules: [],
       },
     },
     {
@@ -83,7 +94,12 @@ export const SAMPLE_FLOW: FlowDoc = {
         kind: 'derived',
         name: 'report',
         primaryNodeId: 'i1',
-        pickColumns: ['id', 'final', 'tier'],
+        inputJoins: [],
+        pickColumns: [
+          { from: 'primary', col: 'id' },
+          { from: 'primary', col: 'final' },
+          { from: 'primary', col: 'tier' },
+        ],
         computeColumns: [],
         rules: [],
       },
