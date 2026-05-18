@@ -6,16 +6,14 @@ import ReactFlow, {
   MiniMap,
   ReactFlowProvider,
   addEdge,
-  applyEdgeChanges,
-  applyNodeChanges,
+  useEdgesState,
+  useNodesState,
   useReactFlow,
 } from 'reactflow';
 import type {
   Node as RFNode,
   Edge as RFEdge,
   Connection,
-  NodeChange,
-  EdgeChange,
   OnConnect,
   ReactFlowInstance,
 } from 'reactflow';
@@ -27,27 +25,43 @@ import type { FlowDoc, FlowNode, NodeConfig, NodeKind } from '@/lib/types';
 import { defaultConfig } from '@/lib/types';
 import type { RunResult } from '@/lib/runFlow';
 
-const nodeTypes = { tb: TableNode };
+const nodeTypes = Object.freeze({ tb: TableNode });
 const VALID_KINDS: NodeKind[] = ['dynamic', 'crud', 'derived', 'interceptor'];
 
-function toRfNodes(nodes: FlowNode[]): RFNode[] {
-  return nodes.map((n) => ({
-    id: n.id,
-    type: 'tb',
-    position: n.position,
-    data: { kind: n.kind, name: n.config.name, subtitle: subtitleFor(n) },
-  }));
+type NodeData = { kind: NodeKind; name: string; subtitle?: string; config: NodeConfig };
+
+function subtitleFor(cfg: NodeConfig): string {
+  if (cfg.kind === 'dynamic') return cfg.fetchUrl;
+  if (cfg.kind === 'crud') return `${cfg.schema.length} cols • h=${cfg.history ? 'on' : 'off'}`;
+  if (cfg.kind === 'derived') return `${cfg.pickColumns.length}pick / ${cfg.computeColumns.length}cmp / ${cfg.rules.length}rules`;
+  return `${cfg.mode} • ${cfg.guard}`;
 }
 
-function subtitleFor(n: FlowNode): string {
-  const c = n.config;
-  if (c.kind === 'dynamic') return c.fetchUrl;
-  if (c.kind === 'crud') return `${c.schema.length} cols • h=${c.history ? 'on' : 'off'}`;
-  if (c.kind === 'derived') return `${c.pickColumns.length}pick / ${c.computeColumns.length}cmp / ${c.rules.length}rules`;
-  return `${c.mode} • ${c.guard}`;
+function fromDoc(doc: FlowDoc): { nodes: RFNode<NodeData>[]; edges: RFEdge[] } {
+  return {
+    nodes: doc.nodes.map<RFNode<NodeData>>((n) => ({
+      id: n.id,
+      type: 'tb',
+      position: n.position,
+      data: { kind: n.kind, name: n.config.name, subtitle: subtitleFor(n.config), config: n.config },
+    })),
+    edges: doc.edges.map<RFEdge>((e) => ({ id: e.id, source: e.source, target: e.target })),
+  };
 }
 
-function newId(kind: NodeKind, existing: FlowNode[]): string {
+function toDoc(nodes: RFNode<NodeData>[], edges: RFEdge[]): FlowDoc {
+  return {
+    nodes: nodes.map<FlowNode>((n) => ({
+      id: n.id,
+      kind: n.data.kind,
+      position: n.position,
+      config: n.data.config,
+    })),
+    edges: edges.map((e) => ({ id: e.id, source: e.source, target: e.target })),
+  };
+}
+
+function newId(kind: NodeKind, existing: RFNode<NodeData>[]): string {
   const prefix = kind === 'dynamic' ? 'd' : kind === 'crud' ? 'c' : kind === 'derived' ? 'r' : 'i';
   let i = 1;
   while (existing.some((n) => n.id === `${prefix}${i}`)) i++;
@@ -66,61 +80,37 @@ function extractKind(dt: DataTransfer): NodeKind | null {
 }
 
 function Editor() {
-  const [doc, setDoc] = useState<FlowDoc>({ nodes: [], edges: [] });
+  const [nodes, setNodes, onNodesChange] = useNodesState<NodeData>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState<RunResult | null>(null);
   const [status, setStatus] = useState<string>('');
-  const wrapperRef = useRef<HTMLDivElement>(null);
   const instanceRef = useRef<ReactFlowInstance | null>(null);
   const { screenToFlowPosition } = useReactFlow();
 
   useEffect(() => {
     fetch('/api/flow')
       .then((r) => r.json())
-      .then((d: FlowDoc) => setDoc(d))
+      .then((d: FlowDoc) => {
+        const { nodes: n, edges: e } = fromDoc(d);
+        setNodes(n);
+        setEdges(e);
+      })
       .catch((e) => setStatus(`load error: ${e.message}`));
-  }, []);
+  }, [setNodes, setEdges]);
 
-  const rfNodes = useMemo(() => toRfNodes(doc.nodes), [doc.nodes]);
-  const rfEdges: RFEdge[] = useMemo(
-    () => doc.edges.map((e) => ({ id: e.id, source: e.source, target: e.target, animated: false })),
-    [doc.edges],
+  const onConnect: OnConnect = useCallback(
+    (conn: Connection) => {
+      if (!conn.source || !conn.target || conn.source === conn.target) return;
+      setEdges((eds) => {
+        if (eds.some((e) => e.source === conn.source && e.target === conn.target)) return eds;
+        return addEdge({ id: `e-${conn.source}-${conn.target}-${Date.now()}`, source: conn.source!, target: conn.target! }, eds);
+      });
+    },
+    [setEdges],
   );
-
-  const onNodesChange = useCallback((changes: NodeChange[]) => {
-    setDoc((prev) => {
-      const rf = applyNodeChanges(changes, toRfNodes(prev.nodes));
-      const byId = new Map(rf.map((n) => [n.id, n]));
-      const nextNodes = prev.nodes
-        .filter((n) => byId.has(n.id))
-        .map((n) => {
-          const rfn = byId.get(n.id)!;
-          return { ...n, position: rfn.position };
-        });
-      return { ...prev, nodes: nextNodes };
-    });
-  }, []);
-
-  const onEdgesChange = useCallback((changes: EdgeChange[]) => {
-    setDoc((prev) => {
-      const next = applyEdgeChanges(changes, prev.edges.map((e) => ({ id: e.id, source: e.source, target: e.target })));
-      return { ...prev, edges: next.map((e) => ({ id: e.id, source: e.source, target: e.target })) };
-    });
-  }, []);
-
-  const onConnect: OnConnect = useCallback((conn: Connection) => {
-    if (!conn.source || !conn.target || conn.source === conn.target) return;
-    setDoc((prev) => {
-      if (prev.edges.some((e) => e.source === conn.source && e.target === conn.target)) return prev;
-      const next = addEdge(
-        { id: `e-${conn.source}-${conn.target}-${Date.now()}`, source: conn.source!, target: conn.target! },
-        prev.edges.map((e) => ({ id: e.id, source: e.source, target: e.target })),
-      );
-      return { ...prev, edges: next.map((e) => ({ id: e.id, source: e.source, target: e.target })) };
-    });
-  }, []);
 
   const onDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -139,30 +129,37 @@ function Editor() {
       const position = inst
         ? inst.screenToFlowPosition({ x: e.clientX, y: e.clientY })
         : screenToFlowPosition({ x: e.clientX, y: e.clientY });
-      setDoc((prev) => {
-        const id = newId(kind, prev.nodes);
-        const node: FlowNode = { id, kind, position, config: defaultConfig(kind, `${kind}_${id}`) };
-        return { ...prev, nodes: [...prev.nodes, node] };
+      setNodes((prev) => {
+        const id = newId(kind, prev);
+        const config = defaultConfig(kind, `${kind}_${id}`);
+        const node: RFNode<NodeData> = {
+          id,
+          type: 'tb',
+          position,
+          data: { kind, name: config.name, subtitle: subtitleFor(config), config },
+        };
+        return [...prev, node];
       });
       setStatus(`dropped ${kind} @ (${Math.round(position.x)}, ${Math.round(position.y)})`);
     },
-    [screenToFlowPosition],
+    [screenToFlowPosition, setNodes],
   );
 
-  const selected = doc.nodes.find((n) => n.id === selectedId) ?? null;
+  const selected = nodes.find((n) => n.id === selectedId) ?? null;
   const onConfigChange = (cfg: NodeConfig) => {
     if (!selectedId) return;
-    setDoc((prev) => ({
-      ...prev,
-      nodes: prev.nodes.map((n) => (n.id === selectedId ? { ...n, config: cfg } : n)),
-    }));
+    setNodes((prev) =>
+      prev.map((n) =>
+        n.id === selectedId
+          ? { ...n, data: { kind: n.data.kind, name: cfg.name, subtitle: subtitleFor(cfg), config: cfg } }
+          : n,
+      ),
+    );
   };
   const onDeleteNode = () => {
     if (!selectedId) return;
-    setDoc((prev) => ({
-      nodes: prev.nodes.filter((n) => n.id !== selectedId),
-      edges: prev.edges.filter((e) => e.source !== selectedId && e.target !== selectedId),
-    }));
+    setNodes((prev) => prev.filter((n) => n.id !== selectedId));
+    setEdges((prev) => prev.filter((e) => e.source !== selectedId && e.target !== selectedId));
     setSelectedId(null);
   };
 
@@ -173,7 +170,7 @@ function Editor() {
       const r = await fetch('/api/flow', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(doc),
+        body: JSON.stringify(toDoc(nodes, edges)),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       setStatus(`saved (${new Date().toLocaleTimeString()})`);
@@ -188,7 +185,9 @@ function Editor() {
     try {
       const r = await fetch('/api/flow');
       const d = (await r.json()) as FlowDoc;
-      setDoc(d);
+      const { nodes: n, edges: e } = fromDoc(d);
+      setNodes(n);
+      setEdges(e);
       setStatus(`reloaded (${new Date().toLocaleTimeString()})`);
     } catch (e) {
       setStatus(`reload error: ${(e as Error).message}`);
@@ -202,7 +201,7 @@ function Editor() {
       const r = await fetch('/api/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(doc),
+        body: JSON.stringify(toDoc(nodes, edges)),
       });
       const j = (await r.json()) as RunResult;
       setResult(j);
@@ -214,10 +213,17 @@ function Editor() {
     }
   };
 
+  const docNodesForPanel = useMemo<FlowNode[]>(() => toDoc(nodes, edges).nodes, [nodes, edges]);
+  const selectedFlowNode: FlowNode | null = selected
+    ? { id: selected.id, kind: selected.data.kind, position: selected.position, config: selected.data.config }
+    : null;
+
   return (
-    <div className="flex flex-col h-screen">
+    <div className="flex flex-col h-screen w-screen overflow-hidden">
       <header className="flex items-center gap-2 px-4 h-12 border-b border-neutral-800 bg-neutral-950 shrink-0">
-        <div className="font-semibold text-sm tracking-tight">table-block <span className="text-neutral-500 font-normal">verification</span></div>
+        <div className="font-semibold text-sm tracking-tight">
+          table-block <span className="text-neutral-500 font-normal">verification</span>
+        </div>
         <div className="ml-4 flex items-center gap-2">
           <button
             onClick={onRun}
@@ -226,11 +232,7 @@ function Editor() {
           >
             {running ? '실행 중…' : '▶ Run Flow'}
           </button>
-          <button
-            onClick={onSave}
-            disabled={saving}
-            className="px-3 py-1.5 rounded bg-neutral-800 hover:bg-neutral-700 text-sm"
-          >
+          <button onClick={onSave} disabled={saving} className="px-3 py-1.5 rounded bg-neutral-800 hover:bg-neutral-700 text-sm">
             💾 Save
           </button>
           <button onClick={onReload} className="px-3 py-1.5 rounded bg-neutral-800 hover:bg-neutral-700 text-sm">
@@ -242,28 +244,33 @@ function Editor() {
 
       <div className="flex flex-1 min-h-0">
         <NodePalette />
-        <div ref={wrapperRef} className="flex-1 relative" onDragOver={onDragOver} onDrop={onDrop}>
-          <ReactFlow
-            nodes={rfNodes.map((n) => ({ ...n, selected: n.id === selectedId }))}
-            edges={rfEdges}
-            nodeTypes={nodeTypes}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            onConnect={onConnect}
-            onNodeClick={(_, n) => setSelectedId(n.id)}
-            onPaneClick={() => setSelectedId(null)}
-            onInit={(inst) => { instanceRef.current = inst; }}
-            onDragOver={onDragOver}
-            onDrop={onDrop}
-            fitView
-            deleteKeyCode={['Backspace', 'Delete']}
-          >
-            <Background gap={20} color="#1f2937" />
-            <Controls className="!bg-neutral-900 !border-neutral-800" />
-            <MiniMap pannable zoomable maskColor="rgba(0,0,0,0.5)" className="!bg-neutral-900" />
-          </ReactFlow>
+        <div className="flex-1 relative min-w-0">
+          <div className="absolute inset-0" onDragOver={onDragOver} onDrop={onDrop}>
+            <ReactFlow
+              nodes={nodes.map((n) => ({ ...n, selected: n.id === selectedId }))}
+              edges={edges}
+              nodeTypes={nodeTypes as unknown as Record<string, React.ComponentType<unknown>>}
+              onNodesChange={onNodesChange}
+              onEdgesChange={onEdgesChange}
+              onConnect={onConnect}
+              onNodeClick={(_, n) => setSelectedId(n.id)}
+              onPaneClick={() => setSelectedId(null)}
+              onInit={(inst) => {
+                instanceRef.current = inst;
+              }}
+              onDragOver={onDragOver}
+              onDrop={onDrop}
+              fitView
+              deleteKeyCode={['Backspace', 'Delete']}
+              proOptions={{ hideAttribution: true }}
+            >
+              <Background gap={20} color="#1f2937" />
+              <Controls className="!bg-neutral-900 !border-neutral-800" />
+              <MiniMap pannable zoomable maskColor="rgba(0,0,0,0.5)" className="!bg-neutral-900" />
+            </ReactFlow>
+          </div>
         </div>
-        <ConfigPanel node={selected} allNodes={doc.nodes} onChange={onConfigChange} onDelete={onDeleteNode} />
+        <ConfigPanel node={selectedFlowNode} allNodes={docNodesForPanel} onChange={onConfigChange} onDelete={onDeleteNode} />
       </div>
 
       <section className="h-64 border-t border-neutral-800 bg-neutral-950 shrink-0 flex">
@@ -273,7 +280,10 @@ function Editor() {
           {result && (
             <ul className="space-y-1 font-mono text-xs">
               {result.logs.map((l, i) => (
-                <li key={i} className={l.level === 'error' ? 'text-red-400' : l.level === 'warn' ? 'text-amber-300' : 'text-neutral-300'}>
+                <li
+                  key={i}
+                  className={l.level === 'error' ? 'text-red-400' : l.level === 'warn' ? 'text-amber-300' : 'text-neutral-300'}
+                >
                   <span className="text-neutral-500">[{l.nodeId}]</span> {l.message}
                 </li>
               ))}
@@ -284,11 +294,12 @@ function Editor() {
           <div className="text-[11px] uppercase tracking-wider text-neutral-500 mb-2">Tables</div>
           {result &&
             Object.entries(result.tables).map(([id, t]) => {
-              const node = doc.nodes.find((n) => n.id === id);
+              const n = nodes.find((x) => x.id === id);
+              const name = n ? n.data.config.name : '?';
               return (
                 <div key={id} className="mb-3">
                   <div className="text-xs text-neutral-300 mb-1">
-                    <span className="text-neutral-500">{id}</span> · {node?.config.name ?? '?'}
+                    <span className="text-neutral-500">{id}</span> · {name}
                     {t.blocked && <span className="ml-2 text-red-400">blocked</span>}
                     <span className="ml-2 text-neutral-500">({t.rows.length} rows)</span>
                   </div>
@@ -298,7 +309,9 @@ function Editor() {
                         <thead className="bg-neutral-900">
                           <tr>
                             {Object.keys(t.rows[0]).map((k) => (
-                              <th key={k} className="px-2 py-1 border-r border-neutral-800 text-left text-neutral-400">{k}</th>
+                              <th key={k} className="px-2 py-1 border-r border-neutral-800 text-left text-neutral-400">
+                                {k}
+                              </th>
                             ))}
                           </tr>
                         </thead>
@@ -306,7 +319,9 @@ function Editor() {
                           {t.rows.slice(0, 20).map((row, i) => (
                             <tr key={i} className="border-t border-neutral-800">
                               {Object.keys(t.rows[0]).map((k) => (
-                                <td key={k} className="px-2 py-1 border-r border-neutral-800 text-neutral-300">{JSON.stringify(row[k as keyof typeof row])}</td>
+                                <td key={k} className="px-2 py-1 border-r border-neutral-800 text-neutral-300">
+                                  {JSON.stringify(row[k as keyof typeof row])}
+                                </td>
                               ))}
                             </tr>
                           ))}

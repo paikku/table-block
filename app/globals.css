@@ -2,7 +2,7 @@
 @tailwind components;
 @tailwind utilities;
 
-html, body, #__next { height: 100%; }
+html, body { height: 100%; margin: 0; padding: 0; }
 body { @apply bg-neutral-950 text-neutral-100; }
 
 .react-flow__edge-path { stroke: #94a3b8; stroke-width: 1.5; }
