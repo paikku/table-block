@@ -19,6 +19,8 @@ export default function NodePalette() {
             key={it.kind}
             draggable
             onDragStart={(e) => {
+              // text/plain 으로 주 전달 — 특정 브라우저/환경에서 커스텀 MIME 이 빈 문자열로 돌아오는 경우가 있음
+              e.dataTransfer.setData('text/plain', `tableblock:${it.kind}`);
               e.dataTransfer.setData('application/x-tableblock-kind', it.kind);
               e.dataTransfer.effectAllowed = 'move';
             }}

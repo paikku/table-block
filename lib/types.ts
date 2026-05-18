@@ -23,18 +23,38 @@ export interface CrudConfig {
   audit: boolean;
 }
 
-export interface DerivedRule {
-  when: string;                // ex: row.score > 80
-  then: string;                // ex: ({ grade: 'A' })
+export interface InputJoin {
+  fromNodeId: string;          // primary 가 아닌 incoming 노드의 id
+  key: string;                 // 양쪽에 공통으로 존재하는 컬럼명 (v1: 양쪽 동일)
 }
+
+export interface PickEntry {
+  from: string;                // 'primary' 또는 다른 incoming 노드의 id
+  col: string;
+}
+
+export interface ComputeFormula {
+  name: string;
+  mode?: 'formula';
+  formula: string;
+}
+
+export interface ComputeCases {
+  name: string;
+  mode: 'cases';
+  cases: { when: string; then: string }[];
+  default: string;
+}
+
+export type ComputeColumn = ComputeFormula | ComputeCases;
 
 export interface DerivedConfig {
   kind: 'derived';
   name: string;
-  primaryNodeId: string;       // pick 대상 노드 id
-  pickColumns: string[];
-  computeColumns: { name: string; formula: string }[];
-  rules: DerivedRule[];
+  primaryNodeId: string;
+  inputJoins: InputJoin[];
+  pickColumns: PickEntry[];
+  computeColumns: ComputeColumn[];
 }
 
 export type InterceptorMode = 'pass' | 'block-on-fail' | 'filter';
@@ -108,9 +128,9 @@ export function defaultConfig(kind: NodeKind, name: string): NodeConfig {
         kind: 'derived',
         name,
         primaryNodeId: '',
-        pickColumns: ['id'],
-        computeColumns: [{ name: 'derived_value', formula: '`d-${row.id}`' }],
-        rules: [{ when: 'row.id === 1', then: "({ derived_value: 'special' })" }],
+        inputJoins: [],
+        pickColumns: [],
+        computeColumns: [],
       };
     case 'interceptor':
       return {
@@ -121,4 +141,53 @@ export function defaultConfig(kind: NodeKind, name: string): NodeConfig {
         effect: 'log:passed',
       };
   }
+}
+
+// ── Legacy normalization ──
+// Old shape: pickColumns: string[], computeColumns: { name, formula }[]
+// New shape: pickColumns: PickEntry[], computeColumns: ComputeColumn[] (mode optional, default 'formula')
+// loadFlow 시점에 한 번 통과시켜 두면 UI/runFlow 모두 새 모양만 알면 됨.
+
+export function normalizePicks(raw: unknown): PickEntry[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((p) => {
+    if (typeof p === 'string') return { from: 'primary', col: p };
+    const pe = p as Partial<PickEntry>;
+    return { from: pe.from ?? 'primary', col: pe.col ?? '' };
+  });
+}
+
+export function normalizeComputes(raw: unknown): ComputeColumn[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((c) => {
+    const cc = (c ?? {}) as {
+      name?: string;
+      mode?: 'formula' | 'cases';
+      formula?: string;
+      cases?: { when: string; then: string }[];
+      default?: string;
+    };
+    if (cc.mode === 'cases') {
+      return {
+        name: cc.name ?? '',
+        mode: 'cases',
+        cases: Array.isArray(cc.cases) ? cc.cases : [],
+        default: cc.default ?? 'null',
+      };
+    }
+    return { name: cc.name ?? '', mode: 'formula', formula: cc.formula ?? '' };
+  });
+}
+
+export function normalizeNodeConfig(cfg: NodeConfig): NodeConfig {
+  if (cfg.kind !== 'derived') return cfg;
+  // legacy rules 필드가 있어도 무시 (DerivedConfig 에서 제거됨).
+  const { ...rest } = cfg as DerivedConfig & { rules?: unknown };
+  delete (rest as { rules?: unknown }).rules;
+  return {
+    ...rest,
+    inputJoins: Array.isArray(rest.inputJoins) ? rest.inputJoins : [],
+    pickColumns: normalizePicks(rest.pickColumns as unknown),
+    computeColumns: normalizeComputes(rest.computeColumns as unknown),
+  };
 }
