@@ -109,10 +109,19 @@ export async function runFlow(doc: FlowDoc): Promise<RunResult> {
     try {
       if (cfg.kind === 'dynamic') {
         const c = cfg as DynamicConfig;
+        const inputs: Record<string, TableData> = {};
+        for (const uid of upstreamIds) {
+          const un = byId.get(uid);
+          if (un && tables[uid]) inputs[un.config.name] = tables[uid];
+        }
+        const url = c.fetchUrl.replace(/\$\{([^.}\s]+)\.([^}\s]+)\}/g, (m, name, col) => {
+          const v = inputs[name]?.rows[0]?.[col];
+          return v === undefined || v === null ? m : String(v);
+        });
         let rows: Row[];
-        if (/^https?:/.test(c.fetchUrl)) {
+        if (/^https?:/.test(url)) {
           try {
-            const res = await fetch(c.fetchUrl, { signal: AbortSignal.timeout(5000) });
+            const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
             const j = await res.json();
             rows = Array.isArray(j) ? (j as Row[]) : Array.isArray((j as { data?: Row[] }).data) ? (j as { data: Row[] }).data : [j as Row];
           } catch (e) {
@@ -121,7 +130,7 @@ export async function runFlow(doc: FlowDoc): Promise<RunResult> {
           }
         } else {
           rows = mockRowsFromSchema(c.schema);
-          logs.push({ nodeId: id, level: 'info', message: `mock fetch (${c.fetchUrl}) → ${rows.length} rows` });
+          logs.push({ nodeId: id, level: 'info', message: `mock fetch (${url}) → ${rows.length} rows` });
         }
         tables[id] = { schema: c.schema, rows };
         logs.push({ nodeId: id, level: 'info', message: `[Dynamic] ${c.name}: ${rows.length} rows` });
