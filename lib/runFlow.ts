@@ -86,19 +86,34 @@ export interface RowGenResult {
   warnings: string[];
 }
 
+// Generate 의 *Expr override 를 inputs ctx 위에서 평가. 빈/실패면 fallback.
+function resolveExpr<T>(expr: string | undefined, inputs: Record<string, TableData>, fallback: T): T | unknown {
+  if (!expr || !expr.trim()) return fallback;
+  try {
+    const v = safeEval(expr, { inputs });
+    return v === undefined || v === null ? fallback : v;
+  } catch {
+    return fallback;
+  }
+}
+
 function evalGenerate(
   spec: GenerateRange | GenerateCalendar | GenerateRecursion,
+  inputs: Record<string, TableData>,
 ): { rows: Row[]; column: string; type: ColumnDef['type'] } {
   if (spec.kind === 'range') {
+    const from = Number(resolveExpr(spec.fromExpr, inputs, spec.from));
+    const to = Number(resolveExpr(spec.toExpr, inputs, spec.to));
+    const stepRaw = Number(resolveExpr(spec.stepExpr, inputs, spec.step));
+    const step = stepRaw || 1;
     const rows: Row[] = [];
-    const step = spec.step || 1;
     if (step > 0) {
-      for (let v = spec.from; v < spec.to; v += step) {
+      for (let v = from; v < to; v += step) {
         rows.push({ [spec.column]: v });
         if (rows.length > 10000) break;
       }
     } else {
-      for (let v = spec.from; v > spec.to; v += step) {
+      for (let v = from; v > to; v += step) {
         rows.push({ [spec.column]: v });
         if (rows.length > 10000) break;
       }
@@ -106,10 +121,16 @@ function evalGenerate(
     return { rows, column: spec.column, type: 'number' };
   }
   if (spec.kind === 'calendar') {
+    const startStr = String(resolveExpr(spec.startExpr, inputs, spec.start));
+    const endStr = String(resolveExpr(spec.endExpr, inputs, spec.end));
+    const stepDaysVal = Number(resolveExpr(spec.stepDaysExpr, inputs, spec.stepDays));
     const rows: Row[] = [];
-    const start = new Date(spec.start + 'T00:00:00Z');
-    const end = new Date(spec.end + 'T00:00:00Z');
-    const stepMs = Math.max(1, spec.stepDays) * 24 * 60 * 60 * 1000;
+    const start = new Date(startStr + 'T00:00:00Z');
+    const end = new Date(endStr + 'T00:00:00Z');
+    const stepMs = Math.max(1, stepDaysVal || 1) * 24 * 60 * 60 * 1000;
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      return { rows, column: spec.column, type: 'string' };
+    }
     for (let t = start.getTime(); t <= end.getTime(); t += stepMs) {
       rows.push({ [spec.column]: new Date(t).toISOString().slice(0, 10) });
       if (rows.length > 10000) break;
@@ -120,7 +141,7 @@ function evalGenerate(
   const rows: Row[] = [];
   let prev: unknown;
   try {
-    prev = safeEval(spec.seedExpr || 'null', {});
+    prev = safeEval(spec.seedExpr || 'null', { inputs });
   } catch {
     return { rows, column: spec.column, type: 'string' };
   }
@@ -128,14 +149,14 @@ function evalGenerate(
   for (let i = 0; i < max; i++) {
     let cont = false;
     try {
-      cont = !!safeEval(spec.whileExpr || 'false', { ctx: { prev, i } });
+      cont = !!safeEval(spec.whileExpr || 'false', { ctx: { prev, i }, inputs });
     } catch {
       cont = false;
     }
     if (!cont) break;
     rows.push({ [spec.column]: prev });
     try {
-      prev = safeEval(spec.nextExpr || 'ctx.prev', { ctx: { prev, i } });
+      prev = safeEval(spec.nextExpr || 'ctx.prev', { ctx: { prev, i }, inputs });
     } catch {
       break;
     }
@@ -148,6 +169,7 @@ export function evalRowGen(
   filterPredicate: string | undefined,
   primary: TableData | undefined,
   inputByNodeId: Record<string, TableData>,
+  inputsByName: Record<string, TableData> = {},
 ): RowGenResult {
   const warnings: string[] = [];
   let rows: Row[] = [];
@@ -245,7 +267,7 @@ export function evalRowGen(
       schema = [...colTypes.entries()].map(([name, type]) => ({ name, type }));
     }
   } else if (rg.kind === 'generate') {
-    const g = evalGenerate(rg.spec);
+    const g = evalGenerate(rg.spec, inputsByName);
     rows = g.rows;
     schema = [{ name: g.column, type: g.type }];
   }
@@ -254,7 +276,7 @@ export function evalRowGen(
     const before = rows.length;
     rows = rows.filter((row) => {
       try {
-        return !!safeEval(filterPredicate, { row });
+        return !!safeEval(filterPredicate, { row, inputs: inputsByName });
       } catch {
         return false;
       }
@@ -356,7 +378,7 @@ export async function runFlow(doc: FlowDoc): Promise<RunResult> {
         const primary = tables[primaryId];
 
         // 행 층: rowGen 평가
-        const rowGenRes = evalRowGen(c.rowGen, c.rowGenFilter, primary, inputByNodeId);
+        const rowGenRes = evalRowGen(c.rowGen, c.rowGenFilter, primary, inputByNodeId, inputs);
         for (const w of rowGenRes.warnings) {
           logs.push({ nodeId: id, level: 'warn', message: `rowGen: ${w}` });
         }
@@ -471,45 +493,62 @@ export async function runFlow(doc: FlowDoc): Promise<RunResult> {
         logs.push({ nodeId: id, level: 'info', message: `[Derived] ${c.name}: ${outRows.length} rows` });
       } else if (cfg.kind === 'interceptor') {
         const c = cfg as InterceptorConfig;
+        // V-0009: deps[] 의 모든 upstream 을 inputs.<name> 으로 expose.
+        // 관례: 첫 번째 upstream 이 데이터 통과 소스(`src`), 나머지는 변수/lookup.
+        const interceptorInputs: Record<string, TableData> = {};
+        for (const uid of upstreamIds) {
+          const un = byId.get(uid);
+          if (un && tables[uid]) interceptorInputs[un.config.name] = tables[uid];
+        }
         const src = tables[upstreamIds[0]];
         if (!src) {
           logs.push({ nodeId: id, level: 'error', message: 'no input table' });
           tables[id] = { schema: [], rows: [] };
           continue;
         }
+        const subEffect = (effect: string, row?: Row): string =>
+          effect.replace(/\$\{([^.}\s]+)\.([^}\s]+)\}/g, (m, name, col) => {
+            const v = interceptorInputs[name]?.rows[0]?.[col];
+            if (v !== undefined && v !== null) return String(v);
+            if (row && col in row) return String(row[col]);
+            return m;
+          });
         if (c.mode === 'pass') {
           tables[id] = { schema: src.schema, rows: src.rows };
-          logs.push({ nodeId: id, level: 'info', message: `[Interceptor:pass] ${c.name} effect="${c.effect}"` });
+          logs.push({ nodeId: id, level: 'info', message: `[Interceptor:pass] ${c.name} effect="${subEffect(c.effect)}"` });
         } else if (c.mode === 'block-on-fail') {
           let ok = true;
+          let failRow: Row | undefined;
           for (const row of src.rows) {
             try {
-              if (!safeEval(c.guard || 'true', { row })) {
+              if (!safeEval(c.guard || 'true', { row, inputs: interceptorInputs })) {
                 ok = false;
+                failRow = row;
                 break;
               }
             } catch {
               ok = false;
+              failRow = row;
               break;
             }
           }
           if (ok) {
             tables[id] = { schema: src.schema, rows: src.rows };
-            logs.push({ nodeId: id, level: 'info', message: `[Interceptor:block-on-fail] ${c.name} passed` });
+            logs.push({ nodeId: id, level: 'info', message: `[Interceptor:block-on-fail] ${c.name} passed effect="${subEffect(c.effect)}"` });
           } else {
             tables[id] = { schema: src.schema, rows: [], blocked: true };
-            logs.push({ nodeId: id, level: 'error', message: `[Interceptor:block-on-fail] ${c.name} BLOCKED downstream` });
+            logs.push({ nodeId: id, level: 'error', message: `[Interceptor:block-on-fail] ${c.name} BLOCKED downstream effect="${subEffect(c.effect, failRow)}"` });
           }
         } else {
           const filtered = src.rows.filter((row) => {
             try {
-              return !!safeEval(c.guard || 'true', { row });
+              return !!safeEval(c.guard || 'true', { row, inputs: interceptorInputs });
             } catch {
               return false;
             }
           });
           tables[id] = { schema: src.schema, rows: filtered };
-          logs.push({ nodeId: id, level: 'info', message: `[Interceptor:filter] ${c.name} ${src.rows.length} → ${filtered.length}` });
+          logs.push({ nodeId: id, level: 'info', message: `[Interceptor:filter] ${c.name} ${src.rows.length} → ${filtered.length} effect="${subEffect(c.effect)}"` });
         }
       }
     } catch (e) {

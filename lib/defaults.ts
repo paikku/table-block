@@ -14,9 +14,18 @@ export const SAMPLE_FLOW: FlowDoc = {
           { name: 'target_ccy', type: 'string' },
           { name: 'vat_rate', type: 'number' },
           { name: 'promo_active', type: 'boolean' },
+          { name: 'min_final', type: 'number' },
+          { name: 'alert_recipient', type: 'string' },
         ],
         rowsJson: JSON.stringify(
-          [{ base_ccy: 'KRW', target_ccy: 'USD', vat_rate: 0.1, promo_active: true }],
+          [{
+            base_ccy: 'KRW',
+            target_ccy: 'USD',
+            vat_rate: 0.1,
+            promo_active: true,
+            min_final: 0,
+            alert_recipient: 'ops@x',
+          }],
           null,
           2,
         ),
@@ -115,8 +124,9 @@ export const SAMPLE_FLOW: FlowDoc = {
         kind: 'interceptor',
         name: 'validate_final',
         mode: 'block-on-fail',
-        guard: 'row.final >= 0',
-        effect: 'log:price-check',
+        // V-0009: 변수(globals.min_final) 셀 참조를 guard 에서 사용.
+        guard: 'row.final >= (inputs.globals.rows[0].min_final ?? 0)',
+        effect: 'mail:to=${globals.alert_recipient}; price-check',
       },
     },
     {
@@ -144,6 +154,7 @@ export const SAMPLE_FLOW: FlowDoc = {
     { id: 'e-d1-r1', source: 'd1', target: 'r1' },
     { id: 'e-c1-r1', source: 'c1', target: 'r1' },
     { id: 'e-r1-i1', source: 'r1', target: 'i1' },
+    { id: 'e-v1-i1', source: 'v1', target: 'i1' },
     { id: 'e-i1-r2', source: 'i1', target: 'r2' },
   ],
 };

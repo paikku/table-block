@@ -52,12 +52,17 @@ export type ComputeColumn = ComputeFormula | ComputeCases;
 // 행 층 (어떤 행들이 존재하나). 셀 층(pickColumns/computeColumns)은 행마다 평가.
 // rowGen 이 없으면 legacy 동작: primary 의 모든 row 를 그대로 사용.
 
+// *Expr 필드(선택)는 변수 셀 참조 등 표현식으로 정적값을 덮어쓴다 (V-0009).
+// 예: fromExpr = 'inputs.globals.rows[0].period_start'
 export interface GenerateRange {
   kind: 'range';
   column: string;
   from: number;
   to: number;
   step: number;
+  fromExpr?: string;
+  toExpr?: string;
+  stepExpr?: string;
 }
 export interface GenerateCalendar {
   kind: 'calendar';
@@ -65,11 +70,14 @@ export interface GenerateCalendar {
   start: string;      // ISO date (YYYY-MM-DD)
   end: string;        // ISO date inclusive
   stepDays: number;
+  startExpr?: string;
+  endExpr?: string;
+  stepDaysExpr?: string;
 }
 export interface GenerateRecursion {
   kind: 'recursion';
   column: string;
-  seedExpr: string;   // 초기값 JS expression
+  seedExpr: string;   // 초기값 JS expression (inputs 참조 가능)
   nextExpr: string;   // prev → next, ctx.prev 사용 가능
   whileExpr: string;  // ctx.prev 가 truthy 인 동안 진행 ('true' 면 maxRows 까지)
   maxRows: number;
@@ -278,6 +286,9 @@ function normalizeRowGen(raw: unknown): RowGen | undefined {
           from: typeof rs.from === 'number' ? rs.from : 0,
           to: typeof rs.to === 'number' ? rs.to : 10,
           step: typeof rs.step === 'number' && rs.step !== 0 ? rs.step : 1,
+          fromExpr: typeof rs.fromExpr === 'string' ? rs.fromExpr : undefined,
+          toExpr: typeof rs.toExpr === 'string' ? rs.toExpr : undefined,
+          stepExpr: typeof rs.stepExpr === 'string' ? rs.stepExpr : undefined,
         },
       };
     }
@@ -291,6 +302,9 @@ function normalizeRowGen(raw: unknown): RowGen | undefined {
           start: cs.start ?? '2025-01-01',
           end: cs.end ?? '2025-01-07',
           stepDays: typeof cs.stepDays === 'number' && cs.stepDays > 0 ? cs.stepDays : 1,
+          startExpr: typeof cs.startExpr === 'string' ? cs.startExpr : undefined,
+          endExpr: typeof cs.endExpr === 'string' ? cs.endExpr : undefined,
+          stepDaysExpr: typeof cs.stepDaysExpr === 'string' ? cs.stepDaysExpr : undefined,
         },
       };
     }

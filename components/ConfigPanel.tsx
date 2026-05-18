@@ -429,22 +429,40 @@ function RowGenEditor({
             {rg.spec.kind === 'range' && (() => {
               const s = rg.spec as GenerateRange;
               return (
-                <div className="grid grid-cols-2 gap-1">
-                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">col</span>
-                    <input value={s.column} onChange={(e) => setRowGen({ ...rg, spec: { ...s, column: e.target.value } })}
-                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                <div className="space-y-1">
+                  <div className="grid grid-cols-2 gap-1">
+                    <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">col</span>
+                      <input value={s.column} onChange={(e) => setRowGen({ ...rg, spec: { ...s, column: e.target.value } })}
+                        className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                    </label>
+                    <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">from</span>
+                      <input type="number" value={s.from} onChange={(e) => setRowGen({ ...rg, spec: { ...s, from: Number(e.target.value) } })}
+                        className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                    </label>
+                    <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">to</span>
+                      <input type="number" value={s.to} onChange={(e) => setRowGen({ ...rg, spec: { ...s, to: Number(e.target.value) } })}
+                        className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                    </label>
+                    <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">step</span>
+                      <input type="number" value={s.step} onChange={(e) => setRowGen({ ...rg, spec: { ...s, step: Number(e.target.value) || 1 } })}
+                        className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                    </label>
+                  </div>
+                  <div className="text-[10px] text-violet-300/70 pt-0.5">expr override (변수 참조 — V-0009, 비우면 위 정적값 사용)</div>
+                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">from=</span>
+                    <input value={s.fromExpr ?? ''} placeholder="inputs.globals.rows[0].period_start"
+                      onChange={(e) => setRowGen({ ...rg, spec: { ...s, fromExpr: e.target.value || undefined } })}
+                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono text-[11px]" />
                   </label>
-                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">from</span>
-                    <input type="number" value={s.from} onChange={(e) => setRowGen({ ...rg, spec: { ...s, from: Number(e.target.value) } })}
-                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">to=</span>
+                    <input value={s.toExpr ?? ''} placeholder="inputs.globals.rows[0].period_end"
+                      onChange={(e) => setRowGen({ ...rg, spec: { ...s, toExpr: e.target.value || undefined } })}
+                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono text-[11px]" />
                   </label>
-                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">to</span>
-                    <input type="number" value={s.to} onChange={(e) => setRowGen({ ...rg, spec: { ...s, to: Number(e.target.value) } })}
-                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
-                  </label>
-                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">step</span>
-                    <input type="number" value={s.step} onChange={(e) => setRowGen({ ...rg, spec: { ...s, step: Number(e.target.value) || 1 } })}
-                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">step=</span>
+                    <input value={s.stepExpr ?? ''} placeholder="inputs.globals.rows[0].step"
+                      onChange={(e) => setRowGen({ ...rg, spec: { ...s, stepExpr: e.target.value || undefined } })}
+                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono text-[11px]" />
                   </label>
                 </div>
               );
@@ -452,22 +470,40 @@ function RowGenEditor({
             {rg.spec.kind === 'calendar' && (() => {
               const s = rg.spec as GenerateCalendar;
               return (
-                <div className="grid grid-cols-2 gap-1">
-                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">col</span>
-                    <input value={s.column} onChange={(e) => setRowGen({ ...rg, spec: { ...s, column: e.target.value } })}
-                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                <div className="space-y-1">
+                  <div className="grid grid-cols-2 gap-1">
+                    <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">col</span>
+                      <input value={s.column} onChange={(e) => setRowGen({ ...rg, spec: { ...s, column: e.target.value } })}
+                        className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                    </label>
+                    <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">step (d)</span>
+                      <input type="number" value={s.stepDays} onChange={(e) => setRowGen({ ...rg, spec: { ...s, stepDays: Number(e.target.value) || 1 } })}
+                        className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                    </label>
+                    <label className="flex items-center gap-1 col-span-2"><span className="text-neutral-500 w-12">start</span>
+                      <input type="date" value={s.start} onChange={(e) => setRowGen({ ...rg, spec: { ...s, start: e.target.value } })}
+                        className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                    </label>
+                    <label className="flex items-center gap-1 col-span-2"><span className="text-neutral-500 w-12">end</span>
+                      <input type="date" value={s.end} onChange={(e) => setRowGen({ ...rg, spec: { ...s, end: e.target.value } })}
+                        className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                    </label>
+                  </div>
+                  <div className="text-[10px] text-violet-300/70 pt-0.5">expr override (변수 참조 — V-0009, 비우면 위 정적값 사용)</div>
+                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-14">start=</span>
+                    <input value={s.startExpr ?? ''} placeholder="inputs.globals.rows[0].period_start"
+                      onChange={(e) => setRowGen({ ...rg, spec: { ...s, startExpr: e.target.value || undefined } })}
+                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono text-[11px]" />
                   </label>
-                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">step (d)</span>
-                    <input type="number" value={s.stepDays} onChange={(e) => setRowGen({ ...rg, spec: { ...s, stepDays: Number(e.target.value) || 1 } })}
-                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-14">end=</span>
+                    <input value={s.endExpr ?? ''} placeholder="inputs.globals.rows[0].period_end"
+                      onChange={(e) => setRowGen({ ...rg, spec: { ...s, endExpr: e.target.value || undefined } })}
+                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono text-[11px]" />
                   </label>
-                  <label className="flex items-center gap-1 col-span-2"><span className="text-neutral-500 w-12">start</span>
-                    <input type="date" value={s.start} onChange={(e) => setRowGen({ ...rg, spec: { ...s, start: e.target.value } })}
-                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
-                  </label>
-                  <label className="flex items-center gap-1 col-span-2"><span className="text-neutral-500 w-12">end</span>
-                    <input type="date" value={s.end} onChange={(e) => setRowGen({ ...rg, spec: { ...s, end: e.target.value } })}
-                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-14">step (d)=</span>
+                    <input value={s.stepDaysExpr ?? ''} placeholder="inputs.globals.rows[0].step_days"
+                      onChange={(e) => setRowGen({ ...rg, spec: { ...s, stepDaysExpr: e.target.value || undefined } })}
+                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono text-[11px]" />
                   </label>
                 </div>
               );
@@ -512,11 +548,14 @@ function RowGenEditor({
           <span className="text-neutral-500 w-14">filter</span>
           <input
             value={cfg.rowGenFilter ?? ''}
-            placeholder="row.x > 0 (Filter 변형, 비우면 적용 안 함)"
+            placeholder="row.region == inputs.globals.rows[0].target_region"
             onChange={(e) => update({ rowGenFilter: e.target.value })}
             className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono"
           />
         </label>
+        <div className="text-[10px] text-violet-300/70 mt-0.5">
+          V-0009: <code>row.*</code> 외에 <code>inputs.&lt;name&gt;.rows[0].col</code> 로 변수 참조 가능.
+        </div>
       </div>
     </div>
   );
@@ -986,35 +1025,70 @@ export function NodeEditorBody({
         );
       })()}
 
-      {cfg.kind === 'interceptor' && (
-        <>
-          <label className="block">
-            <div className="text-[11px] uppercase tracking-wider text-neutral-500 mb-1">mode</div>
-            <select
-              value={(cfg as InterceptorConfig).mode}
-              onChange={(e) => update({ mode: e.target.value as InterceptorMode } as Partial<InterceptorConfig>)}
-              className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-sm"
-            >
-              <option value="pass">pass</option>
-              <option value="block-on-fail">block-on-fail</option>
-              <option value="filter">filter</option>
-            </select>
-          </label>
-          <TextField
-            label="guard (predicate)"
-            value={(cfg as InterceptorConfig).guard}
-            onChange={(v) => update({ guard: v } as Partial<InterceptorConfig>)}
-            mono
-          />
-          <TextField
-            label="effect (description)"
-            value={(cfg as InterceptorConfig).effect}
-            onChange={(v) => update({ effect: v } as Partial<InterceptorConfig>)}
-            mono
-          />
-          <div className="text-[11px] text-neutral-500">예: <code>mail:to=ops@x</code>, <code>webhook:url=...</code>, <code>log:tag</code></div>
-        </>
-      )}
+      {cfg.kind === 'interceptor' && (() => {
+        const incoming = incomingSources(node, allNodes, allEdges);
+        const dataSrc = incoming[0];
+        const varSrcs = incoming.slice(1);
+        return (
+          <>
+            <label className="block">
+              <div className="text-[11px] uppercase tracking-wider text-neutral-500 mb-1">mode</div>
+              <select
+                value={(cfg as InterceptorConfig).mode}
+                onChange={(e) => update({ mode: e.target.value as InterceptorMode } as Partial<InterceptorConfig>)}
+                className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-sm"
+              >
+                <option value="pass">pass</option>
+                <option value="block-on-fail">block-on-fail</option>
+                <option value="filter">filter</option>
+              </select>
+            </label>
+
+            <div className="border border-violet-500/40 rounded p-2 space-y-1">
+              <div className="text-[11px] uppercase tracking-wider text-violet-300">deps (입력 노드)</div>
+              {incoming.length === 0 && (
+                <div className="text-xs text-neutral-500">incoming edge 가 없습니다. 첫 번째 upstream 이 데이터(<code>row</code>) 소스가 되고, 나머지는 변수/lookup 으로 <code>inputs.&lt;name&gt;</code> 에 노출됩니다.</div>
+              )}
+              {dataSrc && (
+                <div className="text-xs">
+                  <span className="text-neutral-500">data (row): </span>
+                  <span className="font-mono text-neutral-200">{dataSrc.config.name}</span>
+                  <span className="text-neutral-600"> ({dataSrc.kind})</span>
+                </div>
+              )}
+              {varSrcs.length > 0 && (
+                <div className="text-xs">
+                  <div className="text-neutral-500">variables / lookup:</div>
+                  <ul className="ml-2 space-y-0.5">
+                    {varSrcs.map((n) => (
+                      <li key={n.id} className="font-mono text-neutral-200">
+                        inputs.{n.config.name} <span className="text-neutral-600">({n.kind})</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              <div className="text-[10px] text-violet-300/70">
+                V-0009: <code>guard</code>/<code>effect</code> 에서 <code>row.col</code> 또는 <code>inputs.&lt;name&gt;.rows[0].col</code> 사용. effect 문자열엔 <code>{'${name.col}'}</code> 템플릿도 동작.
+              </div>
+            </div>
+
+            <TextField
+              label="guard (predicate)"
+              value={(cfg as InterceptorConfig).guard}
+              onChange={(v) => update({ guard: v } as Partial<InterceptorConfig>)}
+              mono
+            />
+            <TextField
+              label="effect (description)"
+              value={(cfg as InterceptorConfig).effect}
+              onChange={(v) => update({ effect: v } as Partial<InterceptorConfig>)}
+              mono
+            />
+            <div className="text-[11px] text-neutral-500">예: <code>mail:to=${'${globals.alert_recipient}'}</code>, <code>webhook:url=...</code>, <code>log:tag</code></div>
+          </>
+        );
+      })()}
     </div>
   );
 }
