@@ -71,7 +71,6 @@ export const SAMPLE_FLOW: FlowDoc = {
             default: "'low'",
           },
         ],
-        rules: [],
       },
     },
     {
@@ -101,7 +100,6 @@ export const SAMPLE_FLOW: FlowDoc = {
           { from: 'primary', col: 'tier' },
         ],
         computeColumns: [],
-        rules: [],
       },
     },
   ],

@@ -226,24 +226,6 @@ export async function runFlow(doc: FlowDoc): Promise<RunResult> {
               out[cc.name] = null;
             }
           }
-          for (const rule of c.rules) {
-            let matched = false;
-            try {
-              matched = !!safeEval(rule.when, { row, out, inputs });
-            } catch (e) {
-              logs.push({ nodeId: id, level: 'warn', message: `rule.when error: ${(e as Error).message}` });
-            }
-            if (matched) {
-              try {
-                const v = safeEval(rule.then, { row, out, inputs });
-                if (v && typeof v === 'object') Object.assign(out, v as Row);
-                else out._value = v;
-              } catch (e) {
-                logs.push({ nodeId: id, level: 'warn', message: `rule.then error: ${(e as Error).message}` });
-              }
-              break;
-            }
-          }
           outRows.push(out);
         }
         tables[id] = { schema: outSchema, rows: outRows };

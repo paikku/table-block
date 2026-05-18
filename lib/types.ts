@@ -23,11 +23,6 @@ export interface CrudConfig {
   audit: boolean;
 }
 
-export interface DerivedRule {
-  when: string;                // ex: row.score > 80
-  then: string;                // ex: ({ grade: 'A' })
-}
-
 export interface InputJoin {
   fromNodeId: string;          // primary 가 아닌 incoming 노드의 id
   key: string;                 // 양쪽에 공통으로 존재하는 컬럼명 (v1: 양쪽 동일)
@@ -60,7 +55,6 @@ export interface DerivedConfig {
   inputJoins: InputJoin[];
   pickColumns: PickEntry[];
   computeColumns: ComputeColumn[];
-  rules: DerivedRule[];
 }
 
 export type InterceptorMode = 'pass' | 'block-on-fail' | 'filter';
@@ -137,7 +131,6 @@ export function defaultConfig(kind: NodeKind, name: string): NodeConfig {
         inputJoins: [],
         pickColumns: [],
         computeColumns: [],
-        rules: [],
       };
     case 'interceptor':
       return {
@@ -188,10 +181,13 @@ export function normalizeComputes(raw: unknown): ComputeColumn[] {
 
 export function normalizeNodeConfig(cfg: NodeConfig): NodeConfig {
   if (cfg.kind !== 'derived') return cfg;
+  // legacy rules 필드가 있어도 무시 (DerivedConfig 에서 제거됨).
+  const { ...rest } = cfg as DerivedConfig & { rules?: unknown };
+  delete (rest as { rules?: unknown }).rules;
   return {
-    ...cfg,
-    inputJoins: Array.isArray(cfg.inputJoins) ? cfg.inputJoins : [],
-    pickColumns: normalizePicks(cfg.pickColumns as unknown),
-    computeColumns: normalizeComputes(cfg.computeColumns as unknown),
+    ...rest,
+    inputJoins: Array.isArray(rest.inputJoins) ? rest.inputJoins : [],
+    pickColumns: normalizePicks(rest.pickColumns as unknown),
+    computeColumns: normalizeComputes(rest.computeColumns as unknown),
   };
 }

@@ -36,8 +36,7 @@ function subtitleFor(cfg: NodeConfig): string {
   if (cfg.kind === 'derived') {
     const npick = Array.isArray(cfg.pickColumns) ? cfg.pickColumns.length : 0;
     const ncmp = Array.isArray(cfg.computeColumns) ? cfg.computeColumns.length : 0;
-    const nrules = Array.isArray(cfg.rules) ? cfg.rules.length : 0;
-    return `${npick}pick / ${ncmp}cmp / ${nrules}rules`;
+    return `${npick}pick / ${ncmp}cmp`;
   }
   return `${cfg.mode} • ${cfg.guard}`;
 }

@@ -507,64 +507,6 @@ function ComputeColumnsEditor({
   );
 }
 
-function RulesEditor({
-  cfg,
-  update,
-}: {
-  cfg: DerivedConfig;
-  update: (patch: Partial<DerivedConfig>) => void;
-}) {
-  return (
-    <div>
-      <div className="text-[11px] uppercase tracking-wider text-neutral-500 mb-1">rules (first-match-wins, row-level override)</div>
-      <div className="space-y-1">
-        {cfg.rules.map((r, i) => (
-          <div key={i} className="space-y-1 border border-neutral-800 rounded p-2">
-            <div className="flex items-center gap-1">
-              <ReorderBtns
-                onUp={() => update({ rules: moveItem(cfg.rules, i, -1) })}
-                onDown={() => update({ rules: moveItem(cfg.rules, i, +1) })}
-              />
-              <input
-                value={r.when}
-                placeholder="when (predicate)"
-                onChange={(e) => {
-                  const rs = [...cfg.rules];
-                  rs[i] = { ...rs[i], when: e.target.value };
-                  update({ rules: rs });
-                }}
-                className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-xs font-mono"
-              />
-              <button
-                onClick={() => update({ rules: cfg.rules.filter((_, j) => j !== i) })}
-                className="text-neutral-500 hover:text-red-400 px-1 text-xs"
-              >
-                ✕
-              </button>
-            </div>
-            <input
-              value={r.then}
-              placeholder="then (value or object)"
-              onChange={(e) => {
-                const rs = [...cfg.rules];
-                rs[i] = { ...rs[i], then: e.target.value };
-                update({ rules: rs });
-              }}
-              className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-xs font-mono"
-            />
-          </div>
-        ))}
-      </div>
-      <button
-        onClick={() => update({ rules: [...cfg.rules, { when: 'true', then: '({})' }] })}
-        className="mt-1 text-xs text-sky-400 hover:text-sky-300"
-      >
-        + add rule
-      </button>
-    </div>
-  );
-}
-
 // ── main ─────────────────────────────────────────────────────────────────
 
 export default function ConfigPanel({ node, allNodes, allEdges, onChange, onDelete }: Props) {
@@ -672,7 +614,6 @@ export default function ConfigPanel({ node, allNodes, allEdges, onChange, onDele
             <InputJoinsEditor cfg={dcfg} primary={primary} incoming={incoming} update={updateDerived} />
             <PickColumnsEditor cfg={dcfg} primary={primary} incoming={incoming} update={updateDerived} />
             <ComputeColumnsEditor cfg={dcfg} update={updateDerived} />
-            <RulesEditor cfg={dcfg} update={updateDerived} />
           </>
         );
       })()}
