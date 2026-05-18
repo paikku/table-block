@@ -14,6 +14,15 @@ import type {
   ComputeColumn,
   ComputeCases,
   ComputeFormula,
+  RowGen,
+  RowGenKeysFrom,
+  RowGenUnion,
+  RowGenProduct,
+  RowGenGenerate,
+  GenerateSpec,
+  GenerateRange,
+  GenerateCalendar,
+  GenerateRecursion,
 } from '@/lib/types';
 
 interface Props {
@@ -22,6 +31,7 @@ interface Props {
   allEdges: FlowEdge[];
   onChange: (cfg: NodeConfig) => void;
   onDelete: () => void;
+  onOpenLargeEditor?: () => void;
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────
@@ -146,6 +156,368 @@ function ReorderBtns({ onUp, onDown }: { onUp: () => void; onDown: () => void })
     <div className="flex flex-col text-[10px] leading-none">
       <button onClick={onUp} className="text-neutral-500 hover:text-sky-300 px-1">▲</button>
       <button onClick={onDown} className="text-neutral-500 hover:text-sky-300 px-1">▼</button>
+    </div>
+  );
+}
+
+// ── rowGen editor ────────────────────────────────────────────────────────
+
+type RowGenKind = RowGen['kind'] | 'legacy';
+
+function defaultRowGen(kind: RowGen['kind'], firstSourceId: string): RowGen {
+  if (kind === 'keys-from') return { kind: 'keys-from', sourceNodeId: firstSourceId, keyColumns: [] };
+  if (kind === 'union') return { kind: 'union', parts: firstSourceId ? [{ sourceNodeId: firstSourceId, keyColumns: [] }] : [] };
+  if (kind === 'product') return { kind: 'product', parts: firstSourceId ? [{ sourceNodeId: firstSourceId }] : [], joinKeys: [] };
+  return {
+    kind: 'generate',
+    spec: { kind: 'range', column: 'i', from: 0, to: 10, step: 1 },
+  };
+}
+
+function defaultGenerateSpec(kind: GenerateSpec['kind']): GenerateSpec {
+  if (kind === 'range') return { kind: 'range', column: 'i', from: 0, to: 10, step: 1 };
+  if (kind === 'calendar') return { kind: 'calendar', column: 'date', start: '2025-01-01', end: '2025-01-07', stepDays: 1 };
+  return { kind: 'recursion', column: 'n', seedExpr: '1', nextExpr: 'ctx.prev + 1', whileExpr: 'ctx.prev < 10', maxRows: 100 };
+}
+
+function RowGenEditor({
+  cfg,
+  incoming,
+  update,
+}: {
+  cfg: DerivedConfig;
+  incoming: FlowNode[];
+  update: (patch: Partial<DerivedConfig>) => void;
+}) {
+  const sourceOptions = incoming.map((n) => ({ id: n.id, label: `${n.config.name} (${n.kind})`, schema: schemaOfNode(n) }));
+  const schemaFor = (id: string): ColumnDef[] => sourceOptions.find((s) => s.id === id)?.schema ?? [];
+  const firstSourceId = sourceOptions[0]?.id ?? '';
+
+  const currentKind: RowGenKind = cfg.rowGen?.kind ?? 'legacy';
+
+  const setRowGen = (rg: RowGen | undefined) => update({ rowGen: rg });
+
+  return (
+    <div className="space-y-2 border border-violet-500/40 rounded p-2">
+      <div className="flex items-center justify-between">
+        <div className="text-[11px] uppercase tracking-wider text-violet-300">rowGen (행 층)</div>
+        <select
+          value={currentKind}
+          onChange={(e) => {
+            const k = e.target.value as RowGenKind;
+            if (k === 'legacy') setRowGen(undefined);
+            else setRowGen(defaultRowGen(k, firstSourceId));
+          }}
+          className="bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 text-xs"
+        >
+          <option value="legacy">legacy (primary rows)</option>
+          <option value="keys-from">keys-from</option>
+          <option value="union">union</option>
+          <option value="product">product</option>
+          <option value="generate">generate</option>
+        </select>
+      </div>
+
+      {cfg.rowGen?.kind === 'keys-from' && (() => {
+        const rg = cfg.rowGen as RowGenKeysFrom;
+        const cols = schemaFor(rg.sourceNodeId);
+        return (
+          <div className="space-y-1 text-xs">
+            <div className="flex items-center gap-1">
+              <span className="text-neutral-500 w-14">source:</span>
+              <select
+                value={rg.sourceNodeId}
+                onChange={(e) => setRowGen({ ...rg, sourceNodeId: e.target.value })}
+                className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono"
+              >
+                {!sourceOptions.some((s) => s.id === rg.sourceNodeId) && (
+                  <option value={rg.sourceNodeId}>{rg.sourceNodeId || '(none)'}</option>
+                )}
+                {sourceOptions.map((s) => (
+                  <option key={s.id} value={s.id}>{s.label}</option>
+                ))}
+              </select>
+            </div>
+            <div className="text-[10px] text-neutral-500">key columns (비우면 전체):</div>
+            <div className="flex flex-wrap gap-1">
+              {cols.map((c) => {
+                const on = rg.keyColumns.includes(c.name);
+                return (
+                  <button
+                    key={c.name}
+                    onClick={() => {
+                      const next = on ? rg.keyColumns.filter((k) => k !== c.name) : [...rg.keyColumns, c.name];
+                      setRowGen({ ...rg, keyColumns: next });
+                    }}
+                    className={`px-1.5 py-0.5 rounded text-[11px] border font-mono ${
+                      on ? 'bg-violet-500/20 border-violet-500/60 text-violet-200' : 'border-neutral-700 text-neutral-400 hover:text-neutral-200'
+                    }`}
+                  >
+                    {c.name}
+                  </button>
+                );
+              })}
+              {cols.length === 0 && <span className="text-[10px] text-neutral-600">(source 컬럼 없음)</span>}
+            </div>
+          </div>
+        );
+      })()}
+
+      {cfg.rowGen?.kind === 'union' && (() => {
+        const rg = cfg.rowGen as RowGenUnion;
+        const setParts = (parts: RowGenUnion['parts']) => setRowGen({ ...rg, parts });
+        return (
+          <div className="space-y-1 text-xs">
+            {rg.parts.map((p, i) => {
+              const cols = schemaFor(p.sourceNodeId);
+              return (
+                <div key={i} className="border border-neutral-800 rounded p-1.5 space-y-1">
+                  <div className="flex items-center gap-1">
+                    <span className="text-neutral-500 w-12">src:</span>
+                    <select
+                      value={p.sourceNodeId}
+                      onChange={(e) => {
+                        const next = [...rg.parts];
+                        next[i] = { ...next[i], sourceNodeId: e.target.value };
+                        setParts(next);
+                      }}
+                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono"
+                    >
+                      {!sourceOptions.some((s) => s.id === p.sourceNodeId) && (
+                        <option value={p.sourceNodeId}>{p.sourceNodeId || '(none)'}</option>
+                      )}
+                      {sourceOptions.map((s) => (
+                        <option key={s.id} value={s.id}>{s.label}</option>
+                      ))}
+                    </select>
+                    <button
+                      onClick={() => setParts(rg.parts.filter((_, j) => j !== i))}
+                      className="text-neutral-500 hover:text-red-400 px-1"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {cols.map((c) => {
+                      const on = p.keyColumns.includes(c.name);
+                      return (
+                        <button
+                          key={c.name}
+                          onClick={() => {
+                            const next = [...rg.parts];
+                            next[i] = {
+                              ...next[i],
+                              keyColumns: on ? p.keyColumns.filter((k) => k !== c.name) : [...p.keyColumns, c.name],
+                            };
+                            setParts(next);
+                          }}
+                          className={`px-1.5 py-0.5 rounded text-[11px] border font-mono ${
+                            on ? 'bg-violet-500/20 border-violet-500/60 text-violet-200' : 'border-neutral-700 text-neutral-400 hover:text-neutral-200'
+                          }`}
+                        >
+                          {c.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+            <button
+              onClick={() => setParts([...rg.parts, { sourceNodeId: firstSourceId, keyColumns: [] }])}
+              className="text-[11px] text-sky-400 hover:text-sky-300"
+            >
+              + add part
+            </button>
+          </div>
+        );
+      })()}
+
+      {cfg.rowGen?.kind === 'product' && (() => {
+        const rg = cfg.rowGen as RowGenProduct;
+        const setParts = (parts: RowGenProduct['parts']) => setRowGen({ ...rg, parts });
+        // joinKeys 후보: 모든 parts 의 공통 컬럼
+        const schemas = rg.parts.map((p) => schemaFor(p.sourceNodeId));
+        const common =
+          schemas.length === 0
+            ? []
+            : schemas
+                .slice(1)
+                .reduce<string[]>(
+                  (acc, s) => acc.filter((n) => s.some((c) => c.name === n)),
+                  schemas[0].map((c) => c.name),
+                );
+        return (
+          <div className="space-y-1 text-xs">
+            {rg.parts.map((p, i) => (
+              <div key={i} className="flex items-center gap-1">
+                <span className="text-neutral-500 w-12">src{i + 1}:</span>
+                <select
+                  value={p.sourceNodeId}
+                  onChange={(e) => {
+                    const next = [...rg.parts];
+                    next[i] = { ...next[i], sourceNodeId: e.target.value };
+                    setParts(next);
+                  }}
+                  className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono"
+                >
+                  {!sourceOptions.some((s) => s.id === p.sourceNodeId) && (
+                    <option value={p.sourceNodeId}>{p.sourceNodeId || '(none)'}</option>
+                  )}
+                  {sourceOptions.map((s) => (
+                    <option key={s.id} value={s.id}>{s.label}</option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => setParts(rg.parts.filter((_, j) => j !== i))}
+                  className="text-neutral-500 hover:text-red-400 px-1"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+            <button
+              onClick={() => setParts([...rg.parts, { sourceNodeId: firstSourceId }])}
+              className="text-[11px] text-sky-400 hover:text-sky-300"
+            >
+              + add source
+            </button>
+            <div className="pt-1">
+              <div className="text-[10px] text-neutral-500">joinKeys (비우면 cartesian):</div>
+              <div className="flex flex-wrap gap-1 mt-0.5">
+                {common.map((c) => {
+                  const on = rg.joinKeys.includes(c);
+                  return (
+                    <button
+                      key={c}
+                      onClick={() => {
+                        const next = on ? rg.joinKeys.filter((k) => k !== c) : [...rg.joinKeys, c];
+                        setRowGen({ ...rg, joinKeys: next });
+                      }}
+                      className={`px-1.5 py-0.5 rounded text-[11px] border font-mono ${
+                        on ? 'bg-violet-500/20 border-violet-500/60 text-violet-200' : 'border-neutral-700 text-neutral-400 hover:text-neutral-200'
+                      }`}
+                    >
+                      {c}
+                    </button>
+                  );
+                })}
+                {common.length === 0 && <span className="text-[10px] text-neutral-600">(공통 컬럼 없음 → cartesian)</span>}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {cfg.rowGen?.kind === 'generate' && (() => {
+        const rg = cfg.rowGen as RowGenGenerate;
+        const sk = rg.spec.kind;
+        return (
+          <div className="space-y-1 text-xs">
+            <div className="flex items-center gap-1">
+              <span className="text-neutral-500 w-12">spec:</span>
+              <select
+                value={sk}
+                onChange={(e) => setRowGen({ ...rg, spec: defaultGenerateSpec(e.target.value as GenerateSpec['kind']) })}
+                className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5"
+              >
+                <option value="range">range</option>
+                <option value="calendar">calendar</option>
+                <option value="recursion">recursion</option>
+              </select>
+            </div>
+            {rg.spec.kind === 'range' && (() => {
+              const s = rg.spec as GenerateRange;
+              return (
+                <div className="grid grid-cols-2 gap-1">
+                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">col</span>
+                    <input value={s.column} onChange={(e) => setRowGen({ ...rg, spec: { ...s, column: e.target.value } })}
+                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                  </label>
+                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">from</span>
+                    <input type="number" value={s.from} onChange={(e) => setRowGen({ ...rg, spec: { ...s, from: Number(e.target.value) } })}
+                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                  </label>
+                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">to</span>
+                    <input type="number" value={s.to} onChange={(e) => setRowGen({ ...rg, spec: { ...s, to: Number(e.target.value) } })}
+                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                  </label>
+                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">step</span>
+                    <input type="number" value={s.step} onChange={(e) => setRowGen({ ...rg, spec: { ...s, step: Number(e.target.value) || 1 } })}
+                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                  </label>
+                </div>
+              );
+            })()}
+            {rg.spec.kind === 'calendar' && (() => {
+              const s = rg.spec as GenerateCalendar;
+              return (
+                <div className="grid grid-cols-2 gap-1">
+                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">col</span>
+                    <input value={s.column} onChange={(e) => setRowGen({ ...rg, spec: { ...s, column: e.target.value } })}
+                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                  </label>
+                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-12">step (d)</span>
+                    <input type="number" value={s.stepDays} onChange={(e) => setRowGen({ ...rg, spec: { ...s, stepDays: Number(e.target.value) || 1 } })}
+                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                  </label>
+                  <label className="flex items-center gap-1 col-span-2"><span className="text-neutral-500 w-12">start</span>
+                    <input type="date" value={s.start} onChange={(e) => setRowGen({ ...rg, spec: { ...s, start: e.target.value } })}
+                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                  </label>
+                  <label className="flex items-center gap-1 col-span-2"><span className="text-neutral-500 w-12">end</span>
+                    <input type="date" value={s.end} onChange={(e) => setRowGen({ ...rg, spec: { ...s, end: e.target.value } })}
+                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                  </label>
+                </div>
+              );
+            })()}
+            {rg.spec.kind === 'recursion' && (() => {
+              const s = rg.spec as GenerateRecursion;
+              return (
+                <div className="space-y-1">
+                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-14">col</span>
+                    <input value={s.column} onChange={(e) => setRowGen({ ...rg, spec: { ...s, column: e.target.value } })}
+                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                  </label>
+                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-14">seed</span>
+                    <input value={s.seedExpr} onChange={(e) => setRowGen({ ...rg, spec: { ...s, seedExpr: e.target.value } })}
+                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono"
+                      placeholder="e.g. 1" />
+                  </label>
+                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-14">next</span>
+                    <input value={s.nextExpr} onChange={(e) => setRowGen({ ...rg, spec: { ...s, nextExpr: e.target.value } })}
+                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono"
+                      placeholder="ctx.prev * 2" />
+                  </label>
+                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-14">while</span>
+                    <input value={s.whileExpr} onChange={(e) => setRowGen({ ...rg, spec: { ...s, whileExpr: e.target.value } })}
+                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono"
+                      placeholder="ctx.prev < 100" />
+                  </label>
+                  <label className="flex items-center gap-1"><span className="text-neutral-500 w-14">maxRows</span>
+                    <input type="number" value={s.maxRows} onChange={(e) => setRowGen({ ...rg, spec: { ...s, maxRows: Number(e.target.value) || 100 } })}
+                      className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono" />
+                  </label>
+                </div>
+              );
+            })()}
+          </div>
+        );
+      })()}
+
+      {/* Filter wrap (모든 base 변형에 적용) */}
+      <div className="pt-1 border-t border-neutral-800">
+        <label className="flex items-center gap-1 text-xs">
+          <span className="text-neutral-500 w-14">filter</span>
+          <input
+            value={cfg.rowGenFilter ?? ''}
+            placeholder="row.x > 0 (Filter 변형, 비우면 적용 안 함)"
+            onChange={(e) => update({ rowGenFilter: e.target.value })}
+            className="flex-1 bg-neutral-900 border border-neutral-700 rounded px-1 py-0.5 font-mono"
+          />
+        </label>
+      </div>
     </div>
   );
 }
@@ -509,30 +881,25 @@ function ComputeColumnsEditor({
 
 // ── main ─────────────────────────────────────────────────────────────────
 
-export default function ConfigPanel({ node, allNodes, allEdges, onChange, onDelete }: Props) {
-  if (!node) {
-    return (
-      <div className="w-80 shrink-0 border-l border-neutral-800 bg-neutral-950 p-4 overflow-y-auto">
-        <div className="text-xs uppercase tracking-wider text-neutral-500 mb-2">Config</div>
-        <div className="text-sm text-neutral-500">노드를 선택하면 해당 타입의 설정이 표시됩니다.</div>
-      </div>
-    );
-  }
-
+export function NodeEditorBody({
+  node,
+  allNodes,
+  allEdges,
+  onChange,
+  wide,
+}: {
+  node: FlowNode;
+  allNodes: FlowNode[];
+  allEdges: FlowEdge[];
+  onChange: (cfg: NodeConfig) => void;
+  wide?: boolean;
+}) {
   const cfg = node.config;
   const update = (patch: Partial<NodeConfig>) => onChange({ ...cfg, ...patch } as NodeConfig);
   const updateDerived = (patch: Partial<DerivedConfig>) => onChange({ ...(cfg as DerivedConfig), ...patch });
 
   return (
-    <div className="w-80 shrink-0 border-l border-neutral-800 bg-neutral-950 p-4 overflow-y-auto space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <div className="text-[11px] uppercase tracking-wider text-neutral-500">{cfg.kind}</div>
-          <div className="text-sm text-neutral-300">id: <span className="font-mono text-neutral-400">{node.id}</span></div>
-        </div>
-        <button onClick={onDelete} className="text-xs text-red-400 hover:text-red-300">노드 삭제</button>
-      </div>
-
+    <div className={`space-y-4 ${wide ? 'text-sm' : ''}`}>
       <TextField label="name" value={cfg.name} onChange={(v) => update({ name: v } as Partial<NodeConfig>)} />
 
       {cfg.kind === 'dynamic' && (
@@ -569,7 +936,7 @@ export default function ConfigPanel({ node, allNodes, allEdges, onChange, onDele
             label="rows (JSON array)"
             value={(cfg as CrudConfig).rowsJson}
             onChange={(v) => update({ rowsJson: v } as Partial<CrudConfig>)}
-            rows={8}
+            rows={wide ? 14 : 8}
           />
           <div className="flex gap-4">
             <label className="flex items-center gap-2 text-sm">
@@ -598,8 +965,9 @@ export default function ConfigPanel({ node, allNodes, allEdges, onChange, onDele
         const primary = allNodes.find((n) => n.id === dcfg.primaryNodeId);
         return (
           <>
+            <RowGenEditor cfg={dcfg} incoming={incoming} update={updateDerived} />
             <label className="block">
-              <div className="text-[11px] uppercase tracking-wider text-neutral-500 mb-1">primary input</div>
+              <div className="text-[11px] uppercase tracking-wider text-neutral-500 mb-1">primary input (셀 층 lookup용)</div>
               <select
                 value={dcfg.primaryNodeId}
                 onChange={(e) => updateDerived({ primaryNodeId: e.target.value })}
@@ -650,3 +1018,40 @@ export default function ConfigPanel({ node, allNodes, allEdges, onChange, onDele
     </div>
   );
 }
+
+export default function ConfigPanel({ node, allNodes, allEdges, onChange, onDelete, onOpenLargeEditor }: Props) {
+  if (!node) {
+    return (
+      <div className="w-80 shrink-0 border-l border-neutral-800 bg-neutral-950 p-4 overflow-y-auto">
+        <div className="text-xs uppercase tracking-wider text-neutral-500 mb-2">Config</div>
+        <div className="text-sm text-neutral-500">노드를 선택하면 해당 타입의 설정이 표시됩니다.</div>
+      </div>
+    );
+  }
+
+  const cfg = node.config;
+
+  return (
+    <div className="w-80 shrink-0 border-l border-neutral-800 bg-neutral-950 p-4 overflow-y-auto space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="text-[11px] uppercase tracking-wider text-neutral-500">{cfg.kind}</div>
+          <div className="text-sm text-neutral-300">id: <span className="font-mono text-neutral-400">{node.id}</span></div>
+        </div>
+        <button onClick={onDelete} className="text-xs text-red-400 hover:text-red-300">노드 삭제</button>
+      </div>
+
+      {onOpenLargeEditor && (
+        <button
+          onClick={onOpenLargeEditor}
+          className="w-full px-3 py-1.5 rounded bg-violet-500/20 hover:bg-violet-500/30 border border-violet-500/40 text-violet-200 text-xs font-medium"
+        >
+          ⤢ 큰 팝업으로 열기 (편집 + 미리보기)
+        </button>
+      )}
+
+      <NodeEditorBody node={node} allNodes={allNodes} allEdges={allEdges} onChange={onChange} />
+    </div>
+  );
+}
+

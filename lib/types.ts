@@ -48,9 +48,61 @@ export interface ComputeCases {
 
 export type ComputeColumn = ComputeFormula | ComputeCases;
 
+// ── rowGen ──────────────────────────────────────────────────────────────
+// 행 층 (어떤 행들이 존재하나). 셀 층(pickColumns/computeColumns)은 행마다 평가.
+// rowGen 이 없으면 legacy 동작: primary 의 모든 row 를 그대로 사용.
+
+export interface GenerateRange {
+  kind: 'range';
+  column: string;
+  from: number;
+  to: number;
+  step: number;
+}
+export interface GenerateCalendar {
+  kind: 'calendar';
+  column: string;
+  start: string;      // ISO date (YYYY-MM-DD)
+  end: string;        // ISO date inclusive
+  stepDays: number;
+}
+export interface GenerateRecursion {
+  kind: 'recursion';
+  column: string;
+  seedExpr: string;   // 초기값 JS expression
+  nextExpr: string;   // prev → next, ctx.prev 사용 가능
+  whileExpr: string;  // ctx.prev 가 truthy 인 동안 진행 ('true' 면 maxRows 까지)
+  maxRows: number;
+}
+export type GenerateSpec = GenerateRange | GenerateCalendar | GenerateRecursion;
+
+export interface RowGenKeysFrom {
+  kind: 'keys-from';
+  sourceNodeId: string;
+  keyColumns: string[];           // 비우면 source schema 전체 컬럼
+}
+export interface RowGenUnion {
+  kind: 'union';
+  parts: { sourceNodeId: string; keyColumns: string[] }[];
+}
+export interface RowGenProduct {
+  kind: 'product';
+  parts: { sourceNodeId: string }[];
+  joinKeys: string[];             // 비우면 cartesian, 아니면 양쪽에 모두 존재하는 컬럼으로 inner-join
+}
+export interface RowGenGenerate {
+  kind: 'generate';
+  spec: GenerateSpec;
+}
+export type RowGen = RowGenKeysFrom | RowGenUnion | RowGenProduct | RowGenGenerate;
+
 export interface DerivedConfig {
   kind: 'derived';
   name: string;
+  // 행 층
+  rowGen?: RowGen;                // 없으면 legacy: primary 의 row 그대로
+  rowGenFilter?: string;          // base rowGen 결과에 적용되는 술어 (Filter 변형)
+  // 셀 층 입력
   primaryNodeId: string;
   inputJoins: InputJoin[];
   pickColumns: PickEntry[];
@@ -179,13 +231,98 @@ export function normalizeComputes(raw: unknown): ComputeColumn[] {
   });
 }
 
+function normalizeRowGen(raw: unknown): RowGen | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as { kind?: string };
+  if (r.kind === 'keys-from') {
+    const x = raw as Partial<RowGenKeysFrom>;
+    return {
+      kind: 'keys-from',
+      sourceNodeId: x.sourceNodeId ?? '',
+      keyColumns: Array.isArray(x.keyColumns) ? x.keyColumns.filter((s) => typeof s === 'string') : [],
+    };
+  }
+  if (r.kind === 'union') {
+    const x = raw as Partial<RowGenUnion>;
+    return {
+      kind: 'union',
+      parts: Array.isArray(x.parts)
+        ? x.parts.map((p) => ({
+            sourceNodeId: typeof p?.sourceNodeId === 'string' ? p.sourceNodeId : '',
+            keyColumns: Array.isArray(p?.keyColumns) ? p.keyColumns.filter((s) => typeof s === 'string') : [],
+          }))
+        : [],
+    };
+  }
+  if (r.kind === 'product') {
+    const x = raw as Partial<RowGenProduct>;
+    return {
+      kind: 'product',
+      parts: Array.isArray(x.parts)
+        ? x.parts.map((p) => ({ sourceNodeId: typeof p?.sourceNodeId === 'string' ? p.sourceNodeId : '' }))
+        : [],
+      joinKeys: Array.isArray(x.joinKeys) ? x.joinKeys.filter((s) => typeof s === 'string') : [],
+    };
+  }
+  if (r.kind === 'generate') {
+    const x = raw as Partial<RowGenGenerate>;
+    const s = x.spec as Partial<GenerateSpec> | undefined;
+    if (!s || typeof s !== 'object') return undefined;
+    if (s.kind === 'range') {
+      const rs = s as Partial<GenerateRange>;
+      return {
+        kind: 'generate',
+        spec: {
+          kind: 'range',
+          column: rs.column ?? 'i',
+          from: typeof rs.from === 'number' ? rs.from : 0,
+          to: typeof rs.to === 'number' ? rs.to : 10,
+          step: typeof rs.step === 'number' && rs.step !== 0 ? rs.step : 1,
+        },
+      };
+    }
+    if (s.kind === 'calendar') {
+      const cs = s as Partial<GenerateCalendar>;
+      return {
+        kind: 'generate',
+        spec: {
+          kind: 'calendar',
+          column: cs.column ?? 'date',
+          start: cs.start ?? '2025-01-01',
+          end: cs.end ?? '2025-01-07',
+          stepDays: typeof cs.stepDays === 'number' && cs.stepDays > 0 ? cs.stepDays : 1,
+        },
+      };
+    }
+    if (s.kind === 'recursion') {
+      const rc = s as Partial<GenerateRecursion>;
+      return {
+        kind: 'generate',
+        spec: {
+          kind: 'recursion',
+          column: rc.column ?? 'n',
+          seedExpr: rc.seedExpr ?? '1',
+          nextExpr: rc.nextExpr ?? 'ctx.prev + 1',
+          whileExpr: rc.whileExpr ?? 'ctx.prev < 10',
+          maxRows: typeof rc.maxRows === 'number' && rc.maxRows > 0 ? rc.maxRows : 100,
+        },
+      };
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
 export function normalizeNodeConfig(cfg: NodeConfig): NodeConfig {
   if (cfg.kind !== 'derived') return cfg;
   // legacy rules 필드가 있어도 무시 (DerivedConfig 에서 제거됨).
   const { ...rest } = cfg as DerivedConfig & { rules?: unknown };
   delete (rest as { rules?: unknown }).rules;
+  const rg = normalizeRowGen(rest.rowGen as unknown);
   return {
     ...rest,
+    rowGen: rg,
+    rowGenFilter: typeof rest.rowGenFilter === 'string' ? rest.rowGenFilter : undefined,
     inputJoins: Array.isArray(rest.inputJoins) ? rest.inputJoins : [],
     pickColumns: normalizePicks(rest.pickColumns as unknown),
     computeColumns: normalizeComputes(rest.computeColumns as unknown),
