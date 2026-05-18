@@ -17,6 +17,22 @@ interface Props {
   onDelete: () => void;
 }
 
+function primaryColumnNames(allNodes: FlowNode[], primaryId: string): string[] {
+  if (!primaryId) return [];
+  const p = allNodes.find((n) => n.id === primaryId);
+  if (!p) return [];
+  const c = p.config;
+  if (c.kind === 'dynamic' || c.kind === 'crud') return c.schema.map((s) => s.name);
+  if (c.kind === 'derived') {
+    const names: string[] = [];
+    const seen = new Set<string>();
+    for (const n of c.pickColumns) if (!seen.has(n)) { seen.add(n); names.push(n); }
+    for (const cc of c.computeColumns) if (!seen.has(cc.name)) { seen.add(cc.name); names.push(cc.name); }
+    return names;
+  }
+  return [];
+}
+
 function TextField({ label, value, onChange, mono }: { label: string; value: string; onChange: (v: string) => void; mono?: boolean }) {
   return (
     <label className="block">
@@ -189,12 +205,33 @@ export default function ConfigPanel({ node, allNodes, onChange, onDelete }: Prop
               ))}
             </select>
           </label>
-          <TextField
-            label="pickColumns (comma)"
-            value={(cfg as DerivedConfig).pickColumns.join(', ')}
-            onChange={(v) => update({ pickColumns: v.split(',').map((s) => s.trim()).filter(Boolean) } as Partial<DerivedConfig>)}
-            mono
-          />
+          <div>
+            <TextField
+              label="pickColumns (comma)"
+              value={(cfg as DerivedConfig).pickColumns.join(', ')}
+              onChange={(v) => update({ pickColumns: v.split(',').map((s) => s.trim()).filter(Boolean) } as Partial<DerivedConfig>)}
+              mono
+            />
+            <div className="mt-1 flex gap-2">
+              <button
+                disabled={!primaryColumnNames(allNodes, (cfg as DerivedConfig).primaryNodeId).length}
+                onClick={() =>
+                  update({
+                    pickColumns: primaryColumnNames(allNodes, (cfg as DerivedConfig).primaryNodeId),
+                  } as Partial<DerivedConfig>)
+                }
+                className="text-xs text-sky-400 hover:text-sky-300 disabled:text-neutral-600 disabled:hover:text-neutral-600"
+              >
+                Pick all from primary
+              </button>
+              <button
+                onClick={() => update({ pickColumns: [] } as Partial<DerivedConfig>)}
+                className="text-xs text-neutral-400 hover:text-neutral-200"
+              >
+                Clear picks
+              </button>
+            </div>
+          </div>
           <div>
             <div className="text-[11px] uppercase tracking-wider text-neutral-500 mb-1">computeColumns</div>
             <div className="space-y-1">
