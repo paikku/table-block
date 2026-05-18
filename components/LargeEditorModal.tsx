@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FlowDoc, FlowEdge, FlowNode, NodeConfig } from '@/lib/types';
 import type { RunResult, TableData } from '@/lib/runFlow';
 import { NodeEditorBody } from './ConfigPanel';
@@ -26,11 +26,13 @@ export default function LargeEditorModal({
   const [preview, setPreview] = useState<{ result: RunResult; nodeId: string } | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (!open) {
       setPreview(null);
       setErr(null);
+      abortRef.current?.abort();
     }
   }, [open]);
 
@@ -42,9 +44,11 @@ export default function LargeEditorModal({
     return () => window.removeEventListener('keydown', onKey);
   }, [open, onClose]);
 
-  if (!open || !node) return null;
-
-  const runPreview = async () => {
+  const runPreview = useCallback(async () => {
+    if (!node) return;
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
     setLoading(true);
     setErr(null);
     try {
@@ -53,15 +57,37 @@ export default function LargeEditorModal({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(doc),
+        signal: ac.signal,
       });
       const j = (await r.json()) as RunResult;
-      setPreview({ result: j, nodeId: node.id });
+      if (!ac.signal.aborted) setPreview({ result: j, nodeId: node.id });
     } catch (e) {
-      setErr((e as Error).message);
+      if ((e as Error).name !== 'AbortError') setErr((e as Error).message);
     } finally {
-      setLoading(false);
+      if (!ac.signal.aborted) setLoading(false);
     }
-  };
+  }, [buildDoc, node]);
+
+  // 자동 미리보기: 모달이 열려있는 동안 선택 노드의 config / 그래프 구조가 바뀔 때마다
+  // 300ms 디바운스 후 /api/run 실행. 빠른 연속 편집은 묶임.
+  const docSignature = useMemo(() => {
+    if (!open || !node) return '';
+    return JSON.stringify({
+      nodes: allNodes.map((n) => ({ id: n.id, config: n.config })),
+      edges: allEdges.map((e) => ({ s: e.source, t: e.target })),
+      sel: node.id,
+    });
+  }, [open, node, allNodes, allEdges]);
+
+  useEffect(() => {
+    if (!open || !node) return;
+    const t = setTimeout(() => {
+      runPreview();
+    }, 300);
+    return () => clearTimeout(t);
+  }, [docSignature, open, node, runPreview]);
+
+  if (!open || !node) return null;
 
   const nodeTable: TableData | undefined = preview?.result.tables[node.id];
   const nodeLogs = preview?.result.logs.filter((l) => l.nodeId === node.id || l.nodeId === '*') ?? [];
@@ -82,13 +108,25 @@ export default function LargeEditorModal({
               id: <span className="font-mono text-neutral-400">{node.id}</span> · {node.config.name}
             </span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
+            <span
+              className={`text-[11px] flex items-center gap-1 ${loading ? 'text-amber-300' : 'text-neutral-500'}`}
+              title="설정이 바뀔 때마다 자동으로 미리보기를 갱신합니다 (300ms 디바운스)"
+            >
+              <span
+                className={`inline-block h-1.5 w-1.5 rounded-full ${
+                  loading ? 'bg-amber-300 animate-pulse' : 'bg-emerald-400'
+                }`}
+              />
+              {loading ? '자동 미리보기 중…' : '자동 미리보기 ON'}
+            </span>
             <button
               onClick={runPreview}
               disabled={loading}
-              className="px-3 py-1 rounded bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-neutral-900 text-xs font-medium"
+              className="px-2 py-0.5 rounded border border-neutral-700 hover:border-neutral-500 disabled:opacity-50 text-[11px] text-neutral-300"
+              title="지금 즉시 다시 실행"
             >
-              {loading ? '미리보기 중…' : '👁  미리보기'}
+              ↻ 새로고침
             </button>
             <button onClick={onClose} className="text-neutral-400 hover:text-neutral-200 text-sm">✕ 닫기</button>
           </div>
@@ -118,10 +156,8 @@ export default function LargeEditorModal({
             </div>
 
             {err && <div className="text-xs text-red-400 mb-2">error: {err}</div>}
-            {!preview && !loading && (
-              <div className="text-sm text-neutral-500">
-                상단의 <span className="text-amber-400">미리보기</span> 버튼을 눌러 현재 설정으로 노드 결과를 확인하세요.
-              </div>
+            {!preview && loading && (
+              <div className="text-sm text-neutral-500">미리보기 실행 중…</div>
             )}
 
             {nodeLogs.length > 0 && (
