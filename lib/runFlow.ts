@@ -86,8 +86,18 @@ export interface RowGenResult {
   warnings: string[];
 }
 
+// ${node.col} → inputs[node].rows[0][col] (Dynamic fetchUrl 과 동일 메커니즘).
+// 변수 자리 (rowGen Generate args, Interceptor effect) 에서 공용으로 사용.
+function interpolateVarRefs(s: string, inputs: Record<string, TableData>): string {
+  return s.replace(/\$\{([^.}\s]+)\.([^}\s]+)\}/g, (m, name, col) => {
+    const v = inputs[name]?.rows[0]?.[col];
+    return v === undefined || v === null ? m : String(v);
+  });
+}
+
 function evalGenerate(
   spec: GenerateRange | GenerateCalendar | GenerateRecursion,
+  inputs: Record<string, TableData>,
 ): { rows: Row[]; column: string; type: ColumnDef['type'] } {
   if (spec.kind === 'range') {
     const rows: Row[] = [];
@@ -107,8 +117,8 @@ function evalGenerate(
   }
   if (spec.kind === 'calendar') {
     const rows: Row[] = [];
-    const start = new Date(spec.start + 'T00:00:00Z');
-    const end = new Date(spec.end + 'T00:00:00Z');
+    const start = new Date(interpolateVarRefs(spec.start, inputs) + 'T00:00:00Z');
+    const end = new Date(interpolateVarRefs(spec.end, inputs) + 'T00:00:00Z');
     const stepMs = Math.max(1, spec.stepDays) * 24 * 60 * 60 * 1000;
     for (let t = start.getTime(); t <= end.getTime(); t += stepMs) {
       rows.push({ [spec.column]: new Date(t).toISOString().slice(0, 10) });
@@ -148,6 +158,7 @@ export function evalRowGen(
   filterPredicate: string | undefined,
   primary: TableData | undefined,
   inputByNodeId: Record<string, TableData>,
+  inputs: Record<string, TableData> = {},
 ): RowGenResult {
   const warnings: string[] = [];
   let rows: Row[] = [];
@@ -245,7 +256,7 @@ export function evalRowGen(
       schema = [...colTypes.entries()].map(([name, type]) => ({ name, type }));
     }
   } else if (rg.kind === 'generate') {
-    const g = evalGenerate(rg.spec);
+    const g = evalGenerate(rg.spec, inputs);
     rows = g.rows;
     schema = [{ name: g.column, type: g.type }];
   }
@@ -254,7 +265,7 @@ export function evalRowGen(
     const before = rows.length;
     rows = rows.filter((row) => {
       try {
-        return !!safeEval(filterPredicate, { row });
+        return !!safeEval(filterPredicate, { row, inputs });
       } catch {
         return false;
       }
@@ -306,10 +317,7 @@ export async function runFlow(doc: FlowDoc): Promise<RunResult> {
           const un = byId.get(uid);
           if (un && tables[uid]) inputs[un.config.name] = tables[uid];
         }
-        const url = c.fetchUrl.replace(/\$\{([^.}\s]+)\.([^}\s]+)\}/g, (m, name, col) => {
-          const v = inputs[name]?.rows[0]?.[col];
-          return v === undefined || v === null ? m : String(v);
-        });
+        const url = interpolateVarRefs(c.fetchUrl, inputs);
         let rows: Row[];
         if (/^https?:/.test(url)) {
           try {
@@ -355,8 +363,8 @@ export async function runFlow(doc: FlowDoc): Promise<RunResult> {
         const primaryId = c.primaryNodeId || upstreamIds[0];
         const primary = tables[primaryId];
 
-        // 행 층: rowGen 평가
-        const rowGenRes = evalRowGen(c.rowGen, c.rowGenFilter, primary, inputByNodeId);
+        // 행 층: rowGen 평가 (Filter 술어, Generate 인자에서 변수 참조 가능)
+        const rowGenRes = evalRowGen(c.rowGen, c.rowGenFilter, primary, inputByNodeId, inputs);
         for (const w of rowGenRes.warnings) {
           logs.push({ nodeId: id, level: 'warn', message: `rowGen: ${w}` });
         }
@@ -471,20 +479,27 @@ export async function runFlow(doc: FlowDoc): Promise<RunResult> {
         logs.push({ nodeId: id, level: 'info', message: `[Derived] ${c.name}: ${outRows.length} rows` });
       } else if (cfg.kind === 'interceptor') {
         const c = cfg as InterceptorConfig;
+        // deps[]: 첫 upstream = 데이터 흐름 (row context), 나머지 = inputs 로 노출 (변수 참조).
         const src = tables[upstreamIds[0]];
+        const inputs: Record<string, TableData> = {};
+        for (const uid of upstreamIds) {
+          const un = byId.get(uid);
+          if (un && tables[uid]) inputs[un.config.name] = tables[uid];
+        }
         if (!src) {
           logs.push({ nodeId: id, level: 'error', message: 'no input table' });
           tables[id] = { schema: [], rows: [] };
           continue;
         }
+        const effectStr = interpolateVarRefs(c.effect, inputs);
         if (c.mode === 'pass') {
           tables[id] = { schema: src.schema, rows: src.rows };
-          logs.push({ nodeId: id, level: 'info', message: `[Interceptor:pass] ${c.name} effect="${c.effect}"` });
+          logs.push({ nodeId: id, level: 'info', message: `[Interceptor:pass] ${c.name} effect="${effectStr}"` });
         } else if (c.mode === 'block-on-fail') {
           let ok = true;
           for (const row of src.rows) {
             try {
-              if (!safeEval(c.guard || 'true', { row })) {
+              if (!safeEval(c.guard || 'true', { row, inputs })) {
                 ok = false;
                 break;
               }
@@ -495,21 +510,21 @@ export async function runFlow(doc: FlowDoc): Promise<RunResult> {
           }
           if (ok) {
             tables[id] = { schema: src.schema, rows: src.rows };
-            logs.push({ nodeId: id, level: 'info', message: `[Interceptor:block-on-fail] ${c.name} passed` });
+            logs.push({ nodeId: id, level: 'info', message: `[Interceptor:block-on-fail] ${c.name} passed effect="${effectStr}"` });
           } else {
             tables[id] = { schema: src.schema, rows: [], blocked: true };
-            logs.push({ nodeId: id, level: 'error', message: `[Interceptor:block-on-fail] ${c.name} BLOCKED downstream` });
+            logs.push({ nodeId: id, level: 'error', message: `[Interceptor:block-on-fail] ${c.name} BLOCKED downstream effect="${effectStr}"` });
           }
         } else {
           const filtered = src.rows.filter((row) => {
             try {
-              return !!safeEval(c.guard || 'true', { row });
+              return !!safeEval(c.guard || 'true', { row, inputs });
             } catch {
               return false;
             }
           });
           tables[id] = { schema: src.schema, rows: filtered };
-          logs.push({ nodeId: id, level: 'info', message: `[Interceptor:filter] ${c.name} ${src.rows.length} → ${filtered.length}` });
+          logs.push({ nodeId: id, level: 'info', message: `[Interceptor:filter] ${c.name} ${src.rows.length} → ${filtered.length} effect="${effectStr}"` });
         }
       }
     } catch (e) {
